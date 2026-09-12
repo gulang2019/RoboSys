@@ -1,0 +1,21 @@
+[submodule "3rdparty/AR-VLA"]
+	path = 3rdparty/AR-VLA
+	url = https://github.com/insait-institute/AR-VLA-lerobot.git
+[submodule "3rdparty/DynamicVLA"]
+	path = 3rdparty/DynamicVLA
+	url = https://github.com/hzxie/DynamicVLA.git
+[submodule "3rdparty/Jetson-PI"]
+	path = 3rdparty/Jetson-PI
+	url = https://github.com/PKU-SEC-Lab/Jetson-PI.git
+[submodule "3rdparty/FastWAM"]
+	path = 3rdparty/FastWAM
+	url = https://github.com/yuantianyuan01/FastWAM.git
+[submodule "3rdparty/vllm"]
+	path = 3rdparty/vllm
+	url = https://github.com/vllm-project/vllm.git
+[submodule "3rdparty/AutoHorizon"]
+	path = 3rdparty/AutoHorizon
+	url = https://github.com/hatchetProject/AutoHorizon.git
+[submodule "3rdparty/FlashRT"]
+	path = 3rdparty/FlashRT
+	url = https://github.com/flashrt-project/FlashRT.git
