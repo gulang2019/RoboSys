@@ -23,6 +23,7 @@ class PolicyConfig:
     model_dir: str | None = None  # Defaults to checkpoints/{model_name}_pytorch.
     num_steps: int = 10
     chunk_size: int = 10
+    use_cuda_graph: bool = True  # Capture/replay each FlashRT profiling stage.
 
 @dataclass
 class HardwareProfile:

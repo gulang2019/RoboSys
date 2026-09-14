@@ -22,7 +22,9 @@ class FlashRTBackend:
     Supports batch size 1, 224px images and FP16 or FP8 (BF16 residuals).
     Inputs are synthetic, including exactly ``prompt_len`` language embeddings.
     Calibration on synthetic images is for performance, not accuracy evaluation.
-    Targets run eagerly on a private stream and wait for completion. VLM includes
+    Targets replay separate CUDA graphs by default; set use_cuda_graph=False
+    for eager execution. Both modes use a private stream and wait for completion.
+    Capture and warmup happen during preparation, outside profiling. VLM includes
     restoring language inputs; action includes restoring fixed diffusion noise
     and all denoising steps. Preprocessing/model loading are outside the targets.
     The targets share buffers and must not be invoked concurrently.
@@ -77,6 +79,8 @@ class FlashRTBackend:
             raise NotImplementedError("FlashRT profiling supports fp16 and fp8 (BF16 residuals)")
         if config.batch_size != 1 or str(config.image_resolution) != "224":
             raise NotImplementedError("FlashRT profiling requires batch_size=1 and image_resolution=224")
+        if type(config.use_cuda_graph) is not bool:
+            raise ValueError("use_cuda_graph must be a boolean")
         for name in ("num_views", "prompt_len", "num_steps", "chunk_size"):
             value = getattr(config, name)
             if type(value) is not int or value < 1:
@@ -137,18 +141,10 @@ class FlashRTBackend:
                 frontend._copy_tensor_to_pipeline_buf_stream(noise, pipeline.input_noise_buf, stream.cuda_stream)
                 pipeline.transformer_decoder(stream=stream.cuda_stream)
 
-            def synchronized(fn):
-                def run():
-                    with torch.cuda.device(stream.device), torch.inference_mode(), torch.cuda.stream(stream):
-                        fn()
-                    stream.synchronize()
-                return run
-
-            targets = {name: synchronized(fn) for name, fn in
-                       (("vis", vision), ("vlm", vlm), ("action", action))}
-            # Establish valid upstream outputs for independently repeated targets.
-            for target in targets.values():
-                target()
+            targets = _prepare_stage_targets(
+                {"vis": vision, "vlm": vlm, "action": action},
+                torch, stream, use_cuda_graph=config.use_cuda_graph,
+            )
             from safetensors import safe_open
             with safe_open(str(checkpoint / "model.safetensors"), framework="pt") as weights:
                 num_params = sum(prod(weights.get_slice(name).get_shape()) for name in weights.keys())
@@ -158,6 +154,45 @@ class FlashRTBackend:
             profile = PolicyProfile(num_params, _pi05_flops(config), weight_bytes / 1e9,
                                     buffer_bytes / 1e9, {})
         return targets, profile
+
+
+def _prepare_stage_targets(stages, torch, stream, *, use_cuda_graph):
+    """Warm and optionally capture stages in dependency order on one stream.
+
+    Each graph owns a separate allocation pool: stages can be replayed
+    independently and repeatedly. All original callables stay in each returned
+    closure to retain frontend weights, pipeline buffers and input tensors whose
+    addresses are baked into the graph. A capture error propagates to the caller
+    instead of silently profiling eager execution.
+    """
+    stages = dict(stages)
+
+    def synchronized(name, graph=None):
+        def run():
+            with torch.cuda.device(stream.device), torch.inference_mode(), torch.cuda.stream(stream):
+                if graph is None:
+                    stages[name]()
+                else:
+                    graph.replay()
+            stream.synchronize()
+        return run
+
+    targets = {name: synchronized(name) for name in stages}
+    # Establish upstream outputs and stabilize lazy allocations before capture.
+    for _ in range(3 if use_cuda_graph else 1):
+        for target in targets.values():
+            target()
+    if use_cuda_graph:
+        for name, fn in stages.items():
+            with torch.cuda.device(stream.device), torch.inference_mode():
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    fn()
+            targets[name] = synchronized(name, graph)
+            # Capture records work; replay populates outputs for downstream stages
+            # and completes graph initialization before returning to the profiler.
+            targets[name]()
+    return targets
 
 
 def _leaves(value):
