@@ -1,0 +1,38 @@
+diff --git a/src/armory/backends/types.py b/src/armory/backends/types.py
+index 80cec1e..f1a5cf4 100644
+--- a/src/armory/backends/types.py
++++ b/src/armory/backends/types.py
+@@ -84,7 +84,7 @@ class PolicyResult(TypedDict):
+ class ServingPolicy(Protocol):
+     """Synchronous batched-policy interface consumed by ``GpuWorker``."""
+ 
+-    def warmup(self, max_batch_size: int) -> None: ...
++    def warmup(self, max_batch_size: int, batch_sizes: list[int] | None) -> None: ...
+ 
+     def make_infer_request(self) -> SlotData: ...
+ 
+diff --git a/src/backends/openpi_adapter/policy_adapter.py b/src/backends/openpi_adapter/policy_adapter.py
+index 0eb7551..166f8ea 100644
+--- a/src/backends/openpi_adapter/policy_adapter.py
++++ b/src/backends/openpi_adapter/policy_adapter.py
+@@ -294,7 +294,7 @@ class OpenPiPolicyAdapter:
+     def make_infer_request(self) -> SlotData:
+         return warmup_request(self._make_example_fn())
+ 
+-    def warmup(self, max_batch_size: int) -> None:
++    def warmup(self, max_batch_size: int, batch_sizes: list[int] | None = None) -> None:
+         """Warm up both SYNC and RTC paths to trigger JAX JIT compilation."""
+         example_obs = self._make_example_fn()
+         warmup_requests = [warmup_request(example_obs)]
+@@ -313,9 +313,9 @@ class OpenPiPolicyAdapter:
+                     params=RTCParams(prev_action=example_actions, s_param=5, d_param=3),
+                 )
+             )
+-
++        batch_sizes = batch_sizes or list(range(1, max_batch_size + 1))
+         for req in warmup_requests:
+-            for batch_size in range(1, max_batch_size + 1):
++            for batch_size in batch_sizes:
+                 logger.info("Warming up %s batch_size=%d", req.infer_type, batch_size)
+                 result = self.infer_batch([req] * batch_size)
+         logger.info("Warmup complete; output shape: %s", result[0]["actions"].shape)
