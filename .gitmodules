@@ -19,6 +19,9 @@
 [submodule "3rdparty/FlashRT"]
 	path = 3rdparty/FlashRT
 	url = https://github.com/flashrt-project/FlashRT.git
+[submodule "3rdparty/pendulum"]
+	path = 3rdparty/pendulum
+	url = https://github.com/ros2-realtime-demo/pendulum.git
 [submodule "3rdparty/armory"]
 	path = 3rdparty/armory
 	url = https://github.com/GaTech-RL2/armory.git

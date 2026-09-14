@@ -1,3 +1,11 @@
+# TODO
+- [x] Implement the batched policy server.
+- [] Update `benchmark/suc_rate_profile.sh` to multiple gpus.  
+- [ ] Profile the utility function as a function of delay and replan steps.
+    - [] Libero, OpenPI (Siyuan Working on it)
+    - [] Libero, Groot-N1.6
+    - [] Aloha Sim, OpenPI0 (Xunyuan, can you work on this)
+
 # Robort LIBERO benchmark
 
 A batched policy server adapted from Armory and a LIBERO success-rate sweep over
