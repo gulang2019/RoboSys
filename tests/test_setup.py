@@ -9,6 +9,9 @@ def test_setup_is_repeatable_and_preserves_incompatible_checkout(tmp_path):
     root = Path(__file__).resolve().parents[1]
     script = (root / 'setup.sh').read_text().replace('export PATH="$HOME/.local/bin:$PATH"', ': # retain test command stubs')
     (tmp_path / 'setup.sh').write_text(script)
+    profile_script = tmp_path / 'scripts/profile/setup.sh'
+    profile_script.parent.mkdir(parents=True)
+    profile_script.write_text('echo profile-setup >> "${SETUP_TEST_ROOT}/profile-calls"\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     stub = bin_dir / 'stub'
@@ -51,6 +54,7 @@ elif name == 'python' and args == ['-']:
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'Setup complete' in result.stdout
+    assert (tmp_path / 'profile-calls').read_text().splitlines() == ['profile-setup'] * 2
     result = subprocess.run(['bash', str(tmp_path/'setup.sh')],
                             env=dict(env, TEST_LIBERO_REV='wrong-revision'),
                             capture_output=True, text=True, timeout=10)

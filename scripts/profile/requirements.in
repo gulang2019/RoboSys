@@ -1,0 +1,15 @@
+# Resolve from the repository root with --torch-backend cu128.
+-e ./3rdparty/FlashRT[torch]
+torch==2.7.0+cu128
+cuda-python==12.9.7
+nvidia-ml-py==13.610.43
+numpy>=1.24
+ml-dtypes>=0.5.1
+transformers<4.56
+pillow
+pybind11
+cmake>=3.24
+ninja
+setuptools>=64
+wheel
+pytest

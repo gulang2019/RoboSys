@@ -1,0 +1,6 @@
+# Supplements OpenPI's frozen uv.lock; install into .venv-openpi only.
+pytest==9.1.1
+nvidia-ml-py==13.610.43
+cuda-python==12.9.7
+cuda-bindings==12.9.8
+cuda-pathfinder==1.8.1

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ubuntu/Linux CUDA setup for the Robort LIBERO benchmark.
+# Ubuntu/Linux CUDA setup for Armory/LIBERO and Robort profiling.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "${1:-}" == --help ]]; then
@@ -8,15 +8,20 @@ Usage: bash setup.sh
 
 Initialize pinned Git dependencies, apply benchmark patches, install Python
 3.11 and the locked Armory environment, configure LIBERO, download pi05_libero,
-and check CUDA/imports/initial states. Does not launch the sweep.
+build the OpenPI and FlashRT profiling environments, and check imports/initial
+states. Does not launch the sweep.
 Run after cloning RoboSys; requires Linux, internet and an NVIDIA CUDA 12 driver.
-Do not run while a benchmark is using 3rdparty/armory/.venv.
+Do not run while inference or benchmarks are using these environments.
 
 Environment options:
   SKIP_SYSTEM_DEPS=1    Skip Ubuntu apt packages (otherwise uses sudo).
   SKIP_GPU_CHECK=1      Prepare files/environment without an accessible GPU.
-  SKIP_CHECKPOINT=1     Skip downloading the checkpoint.
+  SKIP_CHECKPOINT=1     Skip checkpoint download and conversion.
+  BUILD_FLASHRT=0      Skip compiling FlashRT kernels.
+  INSTALL_OPENPI=0     Skip the OpenPI environment and checkpoint conversion.
+  CUDA_HOME=...        CUDA 12.8 toolkit location (default: /usr/local/cuda-12.8).
   CKPT_DIR=...         Destination (default: checkpoints/pi05_libero).
+  PYTORCH_CKPT_DIR=... Converted destination (default: checkpoints/pi05_libero_pytorch).
   LIBERO_CONFIG_PATH=...  Config directory (default: data/libero_config).
 HELP
     exit 0
@@ -29,6 +34,24 @@ if [[ "${SKIP_SYSTEM_DEPS:-0}" != 1 ]]; then
     sudo apt-get install -y git git-lfs curl ca-certificates build-essential cmake pkg-config \
         libegl1 libgl1 libosmesa6-dev libglew-dev libglfw3-dev libgles2-mesa-dev \
         libglib2.0-0 libsm6 libxrender1 libxext6 ffmpeg
+    if [[ "${BUILD_FLASHRT:-1}" != 0 && ! -x "${CUDA_HOME:-/usr/local/cuda-12.8}/bin/nvcc" ]]; then
+        [[ "${CUDA_HOME:-/usr/local/cuda-12.8}" == /usr/local/cuda-12.8 ]] || {
+            echo 'Install CUDA 12.8 at CUDA_HOME or unset CUDA_HOME to use automatic installation.' >&2
+            exit 1
+        }
+        . /etc/os-release
+        [[ "$ID" == ubuntu && "$(uname -m)" == x86_64 ]] || {
+            echo 'Automatic CUDA toolkit installation requires Ubuntu x86_64.' >&2; exit 1;
+        }
+        keyring="$(mktemp --suffix=.deb)"
+        trap 'rm -f -- "$keyring"' EXIT
+        curl --fail --location "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${VERSION_ID//./}/x86_64/cuda-keyring_1.1-1_all.deb" --output "$keyring"
+        sudo dpkg -i "$keyring"
+        rm -f -- "$keyring"
+        trap - EXIT
+        sudo apt-get update
+        sudo apt-get install -y cuda-toolkit-12-8
+    fi
 fi
 if [[ "${SKIP_GPU_CHECK:-0}" != 1 ]]; then
     nvidia-smi
@@ -69,6 +92,8 @@ apply_patch_once() {
 apply_patch_once "$ARMORY" "$ROOT/scripts/benchmark/armory-batch-warmup.patch"
 apply_patch_once "$LIBERO" "$ROOT/scripts/benchmark/libero-init-states.patch"
 # Armory owns the complete dependency lock, including CUDA JAX and simulation.
+# egl-probe 1.0.2 declares an old CMake minimum; allow its build with CMake 4.
+CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}" \
 GIT_LFS_SKIP_SMUDGE=1 uv sync --project "$ARMORY" --python 3.11 --frozen \
     --extra server --extra evaluation --extra libero
 PYTHON="$ARMORY/.venv/bin/python"
@@ -107,6 +132,7 @@ for name in ('libero_spatial', 'libero_object', 'libero_goal', 'libero_10', 'lib
     print(name, suite.n_tasks, 'tasks: initial states loaded')
 print('FFmpeg:', imageio_ffmpeg.get_ffmpeg_exe())
 PY
+bash "$ROOT/scripts/profile/setup.sh"
 printf '\nSetup complete. Launch the sweep:\n'
 printf 'cd %q\n' "$ROOT"
 printf 'LIBERO_CONFIG_PATH=%q CKPT_DIR=%q bash benchmark/suc_rate_profile.sh\n' \
