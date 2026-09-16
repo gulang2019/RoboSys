@@ -25,9 +25,17 @@ class Runner:
     def _execution(self, config, stream, sizes):
         policy, compiled = self.policy_cache.get(config, stream.device, sizes)
         if config.use_cuda_graph:
-            from robort.policies.openpi_cuda_graph import CudaGraphOpenPIPolicy
-            with CudaGraphOpenPIPolicy(policy, stream, batch_sizes=sizes,
-                                       compiled_stages=compiled) as graphed:
+            if config.backend == 'openpi':
+                from robort.policies.openpi_cuda_graph import CudaGraphOpenPIPolicy
+                execution = CudaGraphOpenPIPolicy(
+                    policy, stream, batch_sizes=sizes, compiled_stages=compiled)
+            elif config.backend in ('flash_rt', 'flashrt'):
+                from robort.policies.flash_rt_cuda_graph import CudaGraphFlashRTPolicy
+                execution = CudaGraphFlashRTPolicy(policy, stream)
+            else:
+                raise NotImplementedError(
+                    f'CUDA graph profiling does not support backend {config.backend!r}')
+            with execution as graphed:
                 yield graphed
         else:
             yield policy
@@ -108,8 +116,10 @@ class Runner:
             raise ValueError('batch_sizes must contain positive integers <= max_batch_size')
         if type(policy_config.use_cuda_graph) is not bool:
             raise ValueError('use_cuda_graph must be a boolean')
-        if policy_config.use_cuda_graph and policy_config.backend != 'openpi':
-            raise NotImplementedError('CUDA graph profiling currently supports the openpi backend only')
+        if (policy_config.use_cuda_graph
+                and policy_config.backend not in ('openpi', 'flash_rt', 'flashrt')):
+            raise NotImplementedError(
+                f'CUDA graph profiling does not support backend {policy_config.backend!r}')
         config = deepcopy(policy_config)
         sizes = sorted(set(sizes))
         with prepare_hardware_env(hardware_config) as stream:

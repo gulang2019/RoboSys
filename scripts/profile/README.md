@@ -1,5 +1,55 @@
 # Profiling environment
 
+## NVIDIA Thor (aarch64 / CUDA 13)
+
+Thor uses the SBSA CUDA layout and an SM110 GPU. It cannot use the x86_64
+CUDA 12.8 lock below. Create the separate OpenPI and FlashRT profiling
+environment instead:
+
+```bash
+source scripts/profile/setup-thor.sh
+```
+
+The Thor installer uses Python 3.11, CUDA 13 PyTorch, CPU JAX for checkpoint
+conversion, the pinned OpenPI revision, and builds the pinned FlashRT submodule
+for SM110. It verifies a real CUDA operation on SM110 before completing. To
+prepare only the environment, without downloading and converting `pi05_libero`, run:
+
+```bash
+SKIP_CHECKPOINT=1 source scripts/profile/setup-thor.sh
+```
+
+The environment is stored in `.venv-profile-thor`. Both `openpi` and `flash_rt`
+are available as profiling backends. FlashRT's Thor Pi0.5 frontend fixes the
+action horizon and denoising count to the checkpoint defaults (10 and 10).
+
+Run a Thor FlashRT profile with the native shape explicitly selected:
+
+```bash
+python -m robort.profile.main \
+  --backend flash_rt --num-views 2 --image-resolution 224 \
+  --precision fp16 --batch-sizes 1 --num-steps 10 --chunk-size 10 \
+  --model-dir "$PYTORCH_CKPT_DIR"
+```
+
+Sweep all four Thor `nvpmodel` modes, restoring the original mode on exit:
+
+```bash
+bash scripts/profile/sweep-thor.sh
+```
+
+The sweep uses `sudo` only to switch modes, profiles with `power_perc=1.0`
+because Thor does not expose NVML power-limit controls, and writes per-mode
+results plus merged `all_hardware_profile.csv` and `all_policy_profile.csv`.
+OpenPI uses CUDA Graph profiling by default; set
+`OPENPI_EXECUTIONS="eager graph"` to measure both paths. FlashRT also uses its
+Thor per-stage CUDA Graph wrapper by default; set
+`FLASHRT_EXECUTIONS="eager graph"` to compare both paths.
+Use `bash scripts/profile/sweep-thor.sh --help` for reduced sweeps and other
+configuration options.
+
+## Linux x86_64 / CUDA 12.8
+
 For the complete Armory/LIBERO, OpenPI, and FlashRT installation, run `bash setup.sh`
 from the repository root. It installs Ubuntu system packages and CUDA Toolkit 12.8
 when missing; a working NVIDIA driver remains a prerequisite. Missing checkpoints are downloaded and converted automatically. The standalone script bootstraps uv if needed.

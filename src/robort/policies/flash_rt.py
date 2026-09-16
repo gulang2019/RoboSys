@@ -12,8 +12,19 @@ from .vla_base import VLABasePolicy
 from ..schemas import InferenceResponse
 
 
+def flashrt_hardware(capability):
+    """Return FlashRT's hardware family for a CUDA compute capability."""
+    if capability == (11, 0):
+        return "thor"
+    if capability in ((8, 9), (12, 0)):
+        return f"rtx_sm{capability[0]}{capability[1]}"
+    raise NotImplementedError(
+        f"FlashRT does not support CUDA capability SM{capability[0]}{capability[1]}"
+    )
+
+
 class FlashRTPolicy(VLABasePolicy):
-    """Single-request FP16 inference on RTX SM89/SM120.
+    """Single-request FP16 inference on RTX SM89/SM120 or Thor SM110.
 
     Stages share FlashRT's resident buffers. Call preprocess, embed, encode,
     decode, postprocess in order; do not interleave requests or threads.
@@ -39,15 +50,29 @@ class FlashRTPolicy(VLABasePolicy):
             raise FileNotFoundError(checkpoint / "model.safetensors")
         with torch.cuda.device(self.device), torch.inference_mode():
             capability = torch.cuda.get_device_capability()
-            if capability not in ((8, 9), (12, 0)):
-                raise NotImplementedError("FlashRTPolicy requires RTX SM89/SM120")
-            from flash_rt.frontends.torch.pi05_rtx_fp16 import Pi05TorchFrontendRtxFP16
-            self.frontend = Pi05TorchFrontendRtxFP16(
-                checkpoint, num_views=2, chunk_size=policy_config.chunk_size,
-                num_steps=policy_config.num_steps, max_prompt_len=policy_config.prompt_len,
-                cache_frames=1, use_fp8=False,
-                hardware=f"rtx_sm{capability[0]}{capability[1]}",
-            )
+            self.hardware = flashrt_hardware(capability)
+            if self.hardware == "thor":
+                from flash_rt.frontends.torch import pi05_thor as frontend_module
+                self._frontend_module = frontend_module
+                self.frontend = frontend_module.Pi05TorchFrontendThor(
+                    checkpoint, num_views=2, use_cuda_graph=False,
+                    autotune=0, use_fp8=False,
+                )
+                if (self.frontend.steps != policy_config.num_steps
+                        or self.frontend.Sa != policy_config.chunk_size):
+                    raise NotImplementedError(
+                        "FlashRT Thor fixes num_steps/chunk_size to "
+                        f"{self.frontend.steps}/{self.frontend.Sa}; got "
+                        f"{policy_config.num_steps}/{policy_config.chunk_size}"
+                    )
+            else:
+                from flash_rt.frontends.torch.pi05_rtx_fp16 import Pi05TorchFrontendRtxFP16
+                self._frontend_module = None
+                self.frontend = Pi05TorchFrontendRtxFP16(
+                    checkpoint, num_views=2, chunk_size=policy_config.chunk_size,
+                    num_steps=policy_config.num_steps, max_prompt_len=policy_config.prompt_len,
+                    cache_frames=1, use_fp8=False, hardware=self.hardware,
+                )
             torch.cuda.synchronize()
         self._active = None
         self._stage = None
@@ -89,6 +114,25 @@ class FlashRTPolicy(VLABasePolicy):
         with torch.cuda.device(self.device):
             frontend = self.frontend
             frontend.set_prompt(observation.prompt, state=observation.state[0])
+            if self.hardware == "thor":
+                images = np.stack(observation.images)
+                np.copyto(frontend._infer_images_u8_np, images)
+                frontend._img_u8_buf.upload(frontend._infer_images_u8_np)
+                stream = torch.cuda.current_stream()
+                stream_int = stream.cuda_stream
+                module = self._frontend_module
+                frontend._patch_embed_ops(stream_int, uint8_input=True)
+                module.siglip_forward(
+                    frontend._gemm, module.fvk, frontend._sig_bufs,
+                    frontend._sig_weights, frontend._sig_dims,
+                    stream=stream_int, attn=frontend._attn,
+                    use_fp8=frontend.use_fp8,
+                )
+                frontend._postln_project_ops(stream_int)
+                stream.synchronize()
+                result = {"state": observation.state, "frontend": frontend}
+                self._active, self._stage = result, "embed"
+                return result
             pipeline = frontend.pipeline
             stream = torch.cuda.current_stream()
             frontend._fill_img_buf({"images": observation.images})
@@ -105,6 +149,21 @@ class FlashRTPolicy(VLABasePolicy):
         self._check(embeddings, "embed")
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream()
+            if self.hardware == "thor":
+                frontend = embeddings["frontend"]
+                module = self._frontend_module
+                buffers, weights, dims = frontend._runtime_encoder_spec()
+                frontend._Kc.zero_()
+                frontend._Vc.zero_()
+                module.encoder_forward(
+                    frontend._gemm, module.fvk, buffers, weights, dims,
+                    stream=stream.cuda_stream, attn=frontend._attn,
+                    use_fp8=frontend.use_fp8,
+                )
+                stream.synchronize()
+                result = {"state": embeddings["state"], "frontend": frontend}
+                self._active, self._stage = result, "encode"
+                return result
             pipeline = embeddings["pipeline"]
             # Encoder overwrites its input, so restore language embeds every time.
             pipeline._copy_lang_embeds_to_encoder_x(stream=stream.cuda_stream)
@@ -118,6 +177,29 @@ class FlashRTPolicy(VLABasePolicy):
     def decode(self, context, noise=None):
         self._check(context, "encode")
         with torch.cuda.device(self.device):
+            if self.hardware == "thor":
+                frontend = context["frontend"]
+                shape = (1, frontend.Sa, 32)
+                if noise is None:
+                    noise = torch.randn(frontend.Sa, 32, device=self.device, dtype=torch.float16)
+                else:
+                    noise = torch.as_tensor(noise, device=self.device, dtype=torch.float16)
+                    if tuple(noise.shape) != shape:
+                        raise ValueError(f"Expected noise shape {shape}")
+                    noise = noise[0]
+                frontend._g_noise.copy_(noise)
+                buffers, weights, dims = frontend._runtime_decoder_spec()
+                stream = torch.cuda.current_stream()
+                self._frontend_module.decoder_forward(
+                    frontend._ctx, self._frontend_module.fvk,
+                    buffers, weights, dims, stream=stream.cuda_stream,
+                    attn=frontend._attn, use_fp8=frontend.use_fp8,
+                )
+                stream.synchronize()
+                actions = frontend._g_noise.float().cpu().numpy()[None]
+                result = {"state": context["state"], "actions": actions}
+                self._active, self._stage = result, "decode"
+                return result
             frontend, pipeline = self.frontend, context["pipeline"]
             stream = torch.cuda.current_stream()
             shape = (1, self.config.chunk_size, 32)

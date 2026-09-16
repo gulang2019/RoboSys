@@ -9,6 +9,7 @@ from math import prod
 from os import environ
 from pathlib import Path
 
+from ..policies.flash_rt import flashrt_hardware
 from .schemas import PolicyConfig, StageProfile
 
 PolicyTargets = dict[str, Callable[[], None]]
@@ -62,13 +63,15 @@ class FlashRTBackend:
             raise RuntimeError("FlashRT profiling requires CUDA")
         device = torch.cuda.current_device()
         capability = torch.cuda.get_device_capability(device)
-        if capability not in ((8, 9), (12, 0)):
-            raise NotImplementedError("FlashRT profiling currently supports RTX SM89/SM120")
+        hardware = flashrt_hardware(capability)
         if stream is not None and stream.device != torch.device("cuda", device):
             raise ValueError("Profiling stream must belong to the current CUDA device")
         overrides = tuple(sorted((name, value) for name, value in environ.items()
                                  if name.startswith(("FLASHRT_", "FVK_"))))
-        model_key = (str(checkpoint), config.model_name, config.precision, device, overrides)
+        thor_shape = ((config.num_views, config.prompt_len, config.num_steps, config.chunk_size)
+                      if hardware == "thor" else None)
+        model_key = (str(checkpoint), config.model_name, config.precision, device,
+                     hardware, thor_shape, overrides)
         if model_key != self._model_key:
             self.release_policies()
             self._model = self._load_model(config, checkpoint, torch, capability)
@@ -123,6 +126,26 @@ class FlashRTBackend:
     @staticmethod
     def _load_model(config, checkpoint, torch, capability):
         fp16 = config.precision == "fp16"
+        hardware = flashrt_hardware(capability)
+        if hardware == "thor":
+            module = import_module("flash_rt.frontends.torch.pi05_thor")
+            frontend_type = getattr(module, "Pi05TorchFrontendThor")
+            with torch.inference_mode(), torch.cuda.stream(torch.cuda.default_stream()):
+                frontend = frontend_type(
+                    checkpoint, num_views=config.num_views,
+                    use_cuda_graph=False, autotune=0, use_fp8=not fp16,
+                )
+                if (frontend.steps != config.num_steps
+                        or frontend.Sa != config.chunk_size):
+                    raise NotImplementedError(
+                        "FlashRT Thor fixes num_steps/chunk_size to "
+                        f"{frontend.steps}/{frontend.Sa}; got "
+                        f"{config.num_steps}/{config.chunk_size}"
+                    )
+                frontend._robort_hardware = "thor"
+                torch.cuda.synchronize()
+            params = _checkpoint_params(checkpoint)
+            return module, frontend, params
         suffix = "_fp16" if fp16 else ""
         module = import_module(f"flash_rt.frontends.torch.pi05_rtx{suffix}")
         frontend_type = getattr(module, "Pi05TorchFrontendRtxFP16" if fp16 else "Pi05TorchFrontendRtx")
@@ -150,11 +173,7 @@ class FlashRTBackend:
         for name in ("attn_backend", "gemm", "_img_buf", "_noise_buf", "_noise_out",
                      "_precomputed_styles"):
             setattr(frontend, name, None)
-        from safetensors import safe_open
-        with safe_open(str(checkpoint / "model.safetensors"), framework="pt") as weights:
-            params = {name: 0 for name in ("vis", "vlm", "action")}
-            for name in weights.keys():
-                params[_checkpoint_stage(name)] += prod(weights.get_slice(name).get_shape())
+        params = _checkpoint_params(checkpoint)
         return module, frontend, params
 
     @staticmethod
@@ -187,6 +206,9 @@ class FlashRTBackend:
         import numpy as np
 
         module, model, params = model_state
+        if getattr(model, "_robort_hardware", None) == "thor":
+            return FlashRTBackend._prepare_thor(
+                config, module, model, params, torch, stream)
         stream = stream if stream is not None else torch.cuda.Stream()
         with torch.inference_mode(), torch.cuda.stream(stream):
             frontend = FlashRTBackend._execution_frontend(config, module, model, torch)
@@ -242,6 +264,78 @@ class FlashRTBackend:
                 for name in params
             }
             # Capture last so metadata failures cannot leave owned graphs behind.
+            targets = _prepare_stage_targets(
+                {"vis": vision, "vlm": vlm, "action": action},
+                torch, stream, use_cuda_graph=config.use_cuda_graph,
+            )
+        return targets, profile
+
+    @staticmethod
+    def _prepare_thor(config, module, frontend, params, torch, stream=None):
+        """Build SM110 stage targets from FlashRT's native Thor primitives."""
+        import numpy as np
+
+        stream = stream if stream is not None else torch.cuda.Stream()
+        rng = np.random.default_rng(0)
+        with torch.inference_mode(), torch.cuda.stream(stream):
+            # The Thor frontend accepts token ids, which preserves the profile's
+            # exact requested language length without tokenizer-dependent text.
+            vocab = frontend.embedding_weight.shape[0]
+            frontend.set_prompt(np.arange(config.prompt_len, dtype=np.int64) % vocab)
+            images = rng.integers(
+                0, 256, (config.num_views, 224, 224, 3), dtype=np.uint8)
+            np.copyto(frontend._infer_images_u8_np, images)
+            frontend._img_u8_buf.upload(frontend._infer_images_u8_np)
+            noise = torch.from_numpy(
+                rng.standard_normal((config.chunk_size, 32)).astype(np.float16)
+            ).to(device="cuda")
+            torch.cuda.synchronize()
+
+            enc_bufs, enc_weights, enc_dims = frontend._runtime_encoder_spec()
+            dec_bufs, dec_weights, dec_dims = frontend._runtime_decoder_spec()
+
+            def vision():
+                stream_int = stream.cuda_stream
+                frontend._patch_embed_ops(stream_int, uint8_input=True)
+                module.siglip_forward(
+                    frontend._gemm, module.fvk, frontend._sig_bufs,
+                    frontend._sig_weights, frontend._sig_dims,
+                    stream=stream_int, attn=frontend._attn,
+                    use_fp8=frontend.use_fp8,
+                )
+                frontend._postln_project_ops(stream_int)
+
+            def vlm():
+                frontend._Kc.zero_()
+                frontend._Vc.zero_()
+                module.encoder_forward(
+                    frontend._gemm, module.fvk, enc_bufs, enc_weights,
+                    enc_dims, stream=stream.cuda_stream, attn=frontend._attn,
+                    use_fp8=frontend.use_fp8,
+                )
+
+            def action():
+                frontend._g_noise.copy_(noise)
+                module.decoder_forward(
+                    frontend._ctx, module.fvk, dec_bufs, dec_weights,
+                    dec_dims, stream=stream.cuda_stream, attn=frontend._attn,
+                    use_fp8=frontend.use_fp8,
+                )
+
+            from flash_rt.core.cuda_buffer import CudaBuffer
+            resident_bytes = _storage_bytes(vars(frontend), torch)
+            resident_bytes += _buffer_bytes(vars(frontend), CudaBuffer)
+            weight_bytes = {name: params[name] * (2 if config.precision == "fp16" else 1)
+                            for name in params}
+            activation_bytes = max(0, resident_bytes - sum(weight_bytes.values()))
+            flops = _pi05_stage_flops(config)
+            unknown = float("nan")
+            profile = {
+                name: StageProfile(params[name], flops[name], weight_bytes[name] / 1e9,
+                                   activation_bytes / 1e9, unknown, unknown,
+                                   unknown, unknown)
+                for name in params
+            }
             targets = _prepare_stage_targets(
                 {"vis": vision, "vlm": vlm, "action": action},
                 torch, stream, use_cuda_graph=config.use_cuda_graph,
@@ -317,6 +411,16 @@ def _checkpoint_stage(name):
     if name.startswith(("paligemma_with_expert.gemma_expert.", "time_mlp_", "action_in_proj.", "action_out_proj.")):
         return "action"
     raise ValueError(f"Cannot assign checkpoint tensor to a profiling stage: {name}")
+
+
+def _checkpoint_params(checkpoint):
+    from safetensors import safe_open
+
+    params = {name: 0 for name in ("vis", "vlm", "action")}
+    with safe_open(str(checkpoint / "model.safetensors"), framework="pt") as weights:
+        for name in weights.keys():
+            params[_checkpoint_stage(name)] += prod(weights.get_slice(name).get_shape())
+    return params
 
 
 def _weight_stage(name):

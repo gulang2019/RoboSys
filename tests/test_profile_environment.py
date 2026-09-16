@@ -78,6 +78,46 @@ def test_schema_query_failure_shuts_down(devices):
     devices.nvml.nvmlShutdown.assert_called_once()
 
 
+def test_unsupported_power_control_allows_full_power(monkeypatch):
+    class NotSupported(Exception):
+        pass
+
+    events = []
+    torch = MagicMock()
+    torch.cuda.is_available.return_value = True
+    torch.cuda.current_device.return_value = 0
+    torch.cuda.get_device_properties.return_value = SimpleNamespace(
+        name='NVIDIA Thor', multi_processor_count=20,
+        total_memory=128_000_000_000, uuid='thor-uuid')
+    nvml = MagicMock()
+    nvml.NVMLError_NotSupported = NotSupported
+    nvml.nvmlDeviceGetPowerManagementDefaultLimit.side_effect = NotSupported()
+    monkeypatch.setitem(sys.modules, 'torch', torch)
+    monkeypatch.setitem(sys.modules, 'pynvml', nvml)
+
+    config = HardwareConfig(1, 1)
+    assert config.max_power_w != config.max_power_w  # NaN
+
+    stream = Mock()
+    stream.synchronize.side_effect = lambda: events.append('sync')
+
+    @contextmanager
+    def green(*args):
+        yield stream
+
+    monkeypatch.setattr('robort.profile.environment._green_stream', green)
+    with prepare_hardware_env(config):
+        pass
+    nvml.nvmlDeviceGetPowerManagementLimitConstraints.assert_not_called()
+    nvml.nvmlDeviceGetPowerManagementLimit.assert_not_called()
+    nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
+
+    config.power_perc = 0.8
+    with pytest.raises(NotImplementedError, match='power_perc=1.0'):
+        with prepare_hardware_env(config):
+            pass
+
+
 @pytest.mark.parametrize('failure', [False, True])
 def test_power_apply_restore_and_stream_scope(devices, failure):
     config = HardwareConfig(0.8, 0.501)

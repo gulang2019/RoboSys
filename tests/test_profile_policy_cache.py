@@ -89,3 +89,11 @@ def test_compiled_functions_reused_and_graph_execution_closed(cache_env, monkeyp
     assert wrappers[-1].closed
     runner.close()
     assert cache._model is None
+
+
+def test_flashrt_graph_request_does_not_compile_openpi_stages(cache_env):
+    cache, _ = cache_env
+    config = PolicyConfig(backend='flash_rt', use_cuda_graph=True)
+    policy, compiled = cache.get(config, 'cuda:0', [1])
+    assert policy is not None
+    assert compiled is None

@@ -46,7 +46,7 @@ class PolicyCache:
                 policy.config = config
                 self._variants[variant_key] = [policy, None]
             entry = self._variants[variant_key]
-            if config.use_cuda_graph:
+            if config.use_cuda_graph and config.backend == 'openpi':
                 from robort.policies.openpi_cuda_graph import CompiledOpenPIStages
                 if entry[1] is None:
                     entry[1] = CompiledOpenPIStages(entry[0])

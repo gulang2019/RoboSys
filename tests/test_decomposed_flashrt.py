@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("torch")
 from robort.policies import PolicyConfig, create_policy
-from robort.policies.flash_rt import FlashRTPolicy
+from robort.policies.flash_rt import FlashRTPolicy, flashrt_hardware
 from robort.schemas import InferenceRequest
 
 
@@ -19,6 +19,18 @@ def request():
         "observation/state": np.zeros(8, np.float32),
         "prompt": "pick up the red block",
     })
+
+
+@pytest.mark.parametrize(('capability', 'hardware'), [
+    ((8, 9), 'rtx_sm89'), ((11, 0), 'thor'), ((12, 0), 'rtx_sm120'),
+])
+def test_flashrt_hardware_dispatch(capability, hardware):
+    assert flashrt_hardware(capability) == hardware
+
+
+def test_flashrt_hardware_dispatch_rejects_unknown_capability():
+    with pytest.raises(NotImplementedError, match='SM87'):
+        flashrt_hardware((8, 7))
 
 
 @pytest.fixture

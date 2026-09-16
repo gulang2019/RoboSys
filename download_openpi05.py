@@ -20,7 +20,11 @@ def main():
             return
         raise SystemExit(f'{target} exists but is incomplete; move it aside before retrying.')
     from openpi.shared import download
-    source = download.maybe_download('gs://openpi-assets/checkpoints/pi05_libero')
+    # The released checkpoint bucket is public.  Explicit anonymous access
+    # avoids gcsfs probing for Google Application Default Credentials first.
+    source = download.maybe_download(
+        'gs://openpi-assets/checkpoints/pi05_libero', token='anon'
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target)
     marker.touch()

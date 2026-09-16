@@ -16,7 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 HW_CHOICES = [
-    ('power_perc', [0.2,0.4,0.6,0.8,1.0]),
+    ('power_perc', [1.0]),
     ('sm_perc', [0.2,0.4,0.6,0.8,1.0])
 ]
 

@@ -111,17 +111,24 @@ def prepare_hardware_env(hardware_config):
         pynvml.nvmlInit()
         cleanup.callback(pynvml.nvmlShutdown)
         handle = nvml_device_handle(torch, pynvml, device)
-        minimum, maximum = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
-        requested_mw = math.ceil(hardware_config.power_perc * hardware_config.max_power_w * 1000)
-        if not minimum <= requested_mw <= maximum:
-            raise ValueError(f"Requested power limit {requested_mw / 1000:g} W is outside "
-                             f"NVML range [{minimum / 1000:g}, {maximum / 1000:g}] W")
-        previous_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
+        power_control = math.isfinite(hardware_config.max_power_w)
+        if not power_control and hardware_config.power_perc != 1:
+            raise NotImplementedError(
+                "This GPU does not support NVML power-limit control; use power_perc=1.0"
+            )
+        if power_control:
+            minimum, maximum = pynvml.nvmlDeviceGetPowerManagementLimitConstraints(handle)
+            requested_mw = math.ceil(
+                hardware_config.power_perc * hardware_config.max_power_w * 1000)
+            if not minimum <= requested_mw <= maximum:
+                raise ValueError(f"Requested power limit {requested_mw / 1000:g} W is outside "
+                                 f"NVML range [{minimum / 1000:g}, {maximum / 1000:g}] W")
+            previous_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
         # Initialize a working green context before modifying device-wide state.
         torch.cuda.synchronize(device)
         stream = cleanup.enter_context(_green_stream(
             torch, device, math.ceil(hardware_config.num_sms * hardware_config.sm_perc)))
-        if requested_mw != previous_mw:
+        if power_control and requested_mw != previous_mw:
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, requested_mw)
             cleanup.callback(pynvml.nvmlDeviceSetPowerManagementLimit, handle, previous_mw)
             actual_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)

@@ -335,3 +335,30 @@ def test_model_load_failure_is_retryable(cached_backend):
     backend._load_model.side_effect = lambda *args: object()
     backend.prepare_policies(cfg)
     assert backend._model is not None
+
+
+def test_thor_model_load_dispatches_native_frontend(tmp_path, monkeypatch):
+    frontend = SimpleNamespace(steps=10, Sa=50)
+    constructor = Mock(return_value=frontend)
+    module = SimpleNamespace(Pi05TorchFrontendThor=constructor)
+    monkeypatch.setattr('robort.profile.policies.import_module', lambda _: module)
+    monkeypatch.setattr('robort.profile.policies._checkpoint_params',
+                        lambda _: {'vis': 1, 'vlm': 2, 'action': 3})
+    torch = MagicMock()
+    loaded_module, model, params = FlashRTBackend._load_model(
+        replace(config(), precision='fp8', num_steps=10, chunk_size=50),
+        tmp_path, torch, (11, 0))
+    assert loaded_module is module
+    assert model is frontend
+    assert model._robort_hardware == 'thor'
+    assert params == {'vis': 1, 'vlm': 2, 'action': 3}
+    constructor.assert_called_once_with(
+        tmp_path, num_views=2, use_cuda_graph=False, autotune=0, use_fp8=True)
+
+
+def test_thor_model_load_rejects_non_native_shape(tmp_path, monkeypatch):
+    module = SimpleNamespace(
+        Pi05TorchFrontendThor=Mock(return_value=SimpleNamespace(steps=10, Sa=50)))
+    monkeypatch.setattr('robort.profile.policies.import_module', lambda _: module)
+    with pytest.raises(NotImplementedError, match='fixes num_steps/chunk_size to 10/50'):
+        FlashRTBackend._load_model(config(), tmp_path, MagicMock(), (11, 0))

@@ -41,10 +41,10 @@ and warmup still occur per run, outside the measured samples; repeated identical
 runs reuse the Torch compiler results. Call `runner.close()` (or use its context
 manager) to release cache ownership. The runner is synchronous and not thread-safe.
 
-`use_cuda_graph=False` uses the cached eager policy. Graph profiling currently
-supports OpenPI only. OpenPI model precision, action horizon and image/token shapes
-come from its training configuration/transforms; the generic profile metadata
-fields do not override those model properties.
+`use_cuda_graph=False` uses the cached eager policy. Graph profiling supports
+OpenPI and FlashRT on Thor SM110. OpenPI model precision, action horizon and
+image/token shapes come from its training configuration/transforms; the generic
+profile metadata fields do not override those model properties.
 
 ## Measurement conventions
 

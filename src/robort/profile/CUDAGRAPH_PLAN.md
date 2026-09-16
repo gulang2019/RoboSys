@@ -4,8 +4,9 @@ The runner now measures the public policy stages in dependency order, once per
 stage per iteration. Setup and at least one full initialization pass are outside
 measurement. No model or native handle is deep-copied. Public-method timings
 include CPU dispatch, transfers and completion, while stage metadata without an
-inference-side provider is NaN. `use_cuda_graph=True` currently raises explicitly.
-The older `profile/policies.py` graph backend remains separate from this runner.
+inference-side provider is NaN. `use_cuda_graph=True` supports OpenPI and FlashRT
+on Thor SM110. The older `profile/policies.py` graph backend remains separate
+from this runner.
 
 ## 1. Separate host work from capture-safe GPU functions
 

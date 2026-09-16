@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import math
 
 from ..policies import PolicyConfig
 
@@ -40,7 +41,15 @@ class HardwareConfig:
         pynvml.nvmlInit()
         try:
             handle = nvml_device_handle(torch, pynvml, device)
-            self.max_power_w = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle) / 1000
+            try:
+                self.max_power_w = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle) / 1000
+            except Exception as error:
+                unsupported = getattr(pynvml, "NVMLError_NotSupported", None)
+                if not isinstance(unsupported, type) or not isinstance(error, unsupported):
+                    raise
+                # Jetson AGX Thor exposes instantaneous power telemetry but
+                # not NVML's desktop/server power-limit control interface.
+                self.max_power_w = math.nan
         finally:
             pynvml.nvmlShutdown()
 
@@ -96,4 +105,3 @@ class PolicyProfile:
     hardware_config: HardwareConfig
     policy_config: PolicyConfig
     stages: dict[str, StageProfile]
-

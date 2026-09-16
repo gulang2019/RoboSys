@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import math
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -228,12 +228,23 @@ def test_preparation_failure_is_not_masked(experiment):
     runner._test_stream.synchronize.assert_called_once()
 
 
-def test_graph_request_is_explicitly_rejected(experiment):
-    runner, _, config = experiment
+def test_flashrt_graph_request_uses_graph_execution(experiment):
+    _, _, config = experiment
     config.use_cuda_graph = True
-    with pytest.raises(NotImplementedError, match='openpi backend'):
-        runner.profile_policy(hardware(), config)
-    runner.make_model_functions.assert_not_called()
+    runner = Runner(RunnerConfig())
+    runner.policy_cache = Mock()
+    policy = object()
+    runner.policy_cache.get.return_value = policy, None
+    stream = Mock(device='cuda:0')
+    graph = Mock()
+    graph.__enter__ = Mock(return_value=graph)
+    graph.__exit__ = Mock(return_value=False)
+    with patch('robort.policies.flash_rt_cuda_graph.CudaGraphFlashRTPolicy',
+               return_value=graph) as wrapper:
+        with runner._execution(config, stream, [1]) as execution:
+            assert execution is graph
+    wrapper.assert_called_once_with(policy, stream)
+    graph.__exit__.assert_called_once()
 
 
 def test_zero_warmup_still_initializes_outside_timing(experiment):
