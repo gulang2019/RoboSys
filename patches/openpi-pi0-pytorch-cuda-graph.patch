@@ -1,0 +1,85 @@
+diff --git a/src/openpi/models_pytorch/pi0_pytorch.py b/src/openpi/models_pytorch/pi0_pytorch.py
+index e68ddb7..eb5544c 100644
+--- a/src/openpi/models_pytorch/pi0_pytorch.py
++++ b/src/openpi/models_pytorch/pi0_pytorch.py
+@@ -192,7 +192,6 @@ class PI0Pytorch(nn.Module):
+         """
+         embs = []
+         pad_masks = []
+-        att_masks = []
+ 
+         # Process images
+         for img, img_mask in zip(images, img_masks, strict=True):
+@@ -207,9 +206,6 @@ class PI0Pytorch(nn.Module):
+             embs.append(img_emb)
+             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
+ 
+-            # Create attention masks so that image tokens attend to each other
+-            att_masks += [0] * num_img_embs
+-
+         # Process language tokens
+         def lang_embed_func(lang_tokens):
+             lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
+@@ -222,12 +218,9 @@ class PI0Pytorch(nn.Module):
+         pad_masks.append(lang_masks)
+ 
+         # full attention between image and language inputs
+-        num_lang_embs = lang_emb.shape[1]
+-        att_masks += [0] * num_lang_embs
+-
+         embs = torch.cat(embs, dim=1)
+         pad_masks = torch.cat(pad_masks, dim=1)
+-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
++        att_masks = torch.zeros(pad_masks.shape[1], dtype=torch.bool, device=pad_masks.device)
+ 
+         # Get batch size from the first dimension of the concatenated tensors
+         bsize = pad_masks.shape[0]
+@@ -239,7 +232,6 @@ class PI0Pytorch(nn.Module):
+         """Embed state, noisy_actions, timestep to prepare for Expert Gemma processing."""
+         embs = []
+         pad_masks = []
+-        att_masks = []
+ 
+         if not self.pi05:
+             if self.state_proj.weight.dtype == torch.float32:
+@@ -258,9 +250,6 @@ class PI0Pytorch(nn.Module):
+             state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+             pad_masks.append(state_mask)
+ 
+-            # Set attention masks so that image and language inputs do not attend to state or actions
+-            att_masks += [1]
+-
+         # Embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
+         time_emb = create_sinusoidal_pos_embedding(
+             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
+@@ -304,12 +293,11 @@ class PI0Pytorch(nn.Module):
+         action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
+         pad_masks.append(action_time_mask)
+ 
+-        # Set attention masks so that image, language and state inputs do not attend to action tokens
+-        att_masks += [1] + ([0] * (self.config.action_horizon - 1))
+-
+         embs = torch.cat(embs, dim=1)
+         pad_masks = torch.cat(pad_masks, dim=1)
+-        att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
++        # Start separate attention blocks for state (Pi0 only) and actions.
++        att_masks = embs.new_zeros(self.config.action_horizon if self.pi05 else self.config.action_horizon + 1)
++        att_masks[:1 if self.pi05 else 2].fill_(1)
+         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+ 
+         return embs, pad_masks, att_masks, adarms_cond
+@@ -400,11 +388,11 @@ class PI0Pytorch(nn.Module):
+         )
+ 
+         dt = -1.0 / num_steps
+-        dt = torch.tensor(dt, dtype=torch.float32, device=device)
++        dt = torch.full((), dt, dtype=torch.float32, device=device)
+ 
+         x_t = noise
+-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+-        while time >= -dt / 2:
++        time = torch.ones((), dtype=torch.float32, device=device)
++        for _ in range(num_steps):
+             expanded_time = time.expand(bsize)
+             v_t = self.denoise_step(
+                 state,
