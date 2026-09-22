@@ -85,15 +85,16 @@ def _green_stream(torch, device, requested_sms):
 
 
 @contextmanager
-def prepare_hardware_env(hardware_config):
+def prepare_hardware_env(hardware_config, stream=None):
     """Select a green stream, apply power_perc * max_power_w, then restore both.
 
     max_power_w is the NVML default (rated) power limit, not an overclock limit.
     Fractions must be positive; out-of-range power limits fail without clamping.
     SM counts round upward according to the CUDA driver's allocation rules.
-    The yielded stream is current for Torch operations and must not escape this
-    context. Explicit backend launches and CUDA graph capture/replay must use it.
-    All work must finish before exit; streams and green contexts are destroyed.
+    The yielded stream is current for Torch operations. Explicit backend launches
+    and CUDA graph capture/replay must use it.
+    All work must finish before exit. A supplied stream remains caller-owned;
+    otherwise the temporary stream and green context are destroyed on exit.
 
     Power control requires NVML permissions. Errors propagate, including failures
     to restore power. Calls are serialized within this process; other processes
@@ -126,8 +127,11 @@ def prepare_hardware_env(hardware_config):
             previous_mw = pynvml.nvmlDeviceGetPowerManagementLimit(handle)
         # Initialize a working green context before modifying device-wide state.
         torch.cuda.synchronize(device)
-        stream = cleanup.enter_context(_green_stream(
-            torch, device, math.ceil(hardware_config.num_sms * hardware_config.sm_perc)))
+        if stream is None:
+            stream = cleanup.enter_context(_green_stream(
+                torch, device, math.ceil(hardware_config.num_sms * hardware_config.sm_perc)))
+        elif stream.device != torch.device("cuda", device):
+            raise ValueError("Supplied stream must belong to the hardware device")
         if power_control and requested_mw != previous_mw:
             pynvml.nvmlDeviceSetPowerManagementLimit(handle, requested_mw)
             cleanup.callback(pynvml.nvmlDeviceSetPowerManagementLimit, handle, previous_mw)

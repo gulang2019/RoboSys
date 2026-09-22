@@ -37,7 +37,3 @@ class ServerConfig:
     port: int = 8000
     timeout: float = 1.0
     policy_config: PolicyConfig = field(default_factory=PolicyConfig)
-
-    @property
-    def max_batch_size(self):
-        return self.policy_config.max_batch_size

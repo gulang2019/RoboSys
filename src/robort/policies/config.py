@@ -15,7 +15,7 @@ class PolicyConfig:
     num_steps: int = 10
     chunk_size: int = 10
     use_cuda_graph: bool = True
-    batch_sizes: list[int] | None = None
+    batch_sizes: dict[str, list[int]] | None = None
     # Compatibility with the existing OpenPI inference configuration.
-    max_batch_size: int = 10
     num_sample_steps: int | None = None
+    use_torch_compile: bool = True

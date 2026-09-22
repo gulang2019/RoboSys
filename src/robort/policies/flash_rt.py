@@ -29,7 +29,7 @@ class FlashRTPolicy(VLABasePolicy):
     Stages share FlashRT's resident buffers. Call preprocess, embed, encode,
     decode, postprocess in order; do not interleave requests or threads.
     Embedding runs SigLIP; the vision projection is part of encode in FlashRT.
-    CUDA graphs and batching are intentionally outside this minimal backend.
+    Inference remains eager; profiling can capture the native GPU stages.
     """
 
     def __init__(self, policy_config: PolicyConfig, device: str | None = None):
@@ -38,7 +38,10 @@ class FlashRTPolicy(VLABasePolicy):
             raise NotImplementedError("FlashRTPolicy supports Pi0.5 LIBERO checkpoints")
         if policy_config.precision != "fp16":
             raise NotImplementedError("FlashRTPolicy supports fp16 only")
-        if (policy_config.batch_sizes or [1]) != [1] or policy_config.num_views != 2 or str(policy_config.image_resolution) != "224":
+        sizes = policy_config.batch_sizes or [1]
+        if isinstance(sizes, dict):
+            sizes = [size for stage_sizes in sizes.values() for size in stage_sizes]
+        if not sizes or any(type(size) is not int or size != 1 for size in sizes) or policy_config.num_views != 2 or str(policy_config.image_resolution) != "224":
             raise NotImplementedError("FlashRTPolicy requires batch_size=1, num_views=2 and image_resolution=224")
         if policy_config.num_steps < 1 or policy_config.chunk_size < 1:
             raise ValueError("num_steps and chunk_size must be positive")
@@ -80,6 +83,63 @@ class FlashRTPolicy(VLABasePolicy):
     def _check(self, value, stage):
         if value is not self._active or self._stage != stage:
             raise ValueError(f"Expected the current {stage} result; stages must run in order")
+
+    @torch.inference_mode()
+    def profile_functions(self, stream):
+        """Repeatable native GPU stages; host setup/transfers are not timed.
+
+        The caller must close these targets before destroying the stream.
+        """
+        from robort.profile.policies import _prepare_stage_targets
+
+        if set(self.config.batch_sizes) - {'embed', 'encode', 'decode'}:
+            raise NotImplementedError('FlashRT profiling supports embed, encode and decode')
+        self.make_example_input(1)  # Initialize resident images, prompt and KV buffers.
+        frontend = self.frontend
+        if self.hardware == 'thor':
+            module = self._frontend_module
+            enc_bufs, enc_weights, enc_dims = frontend._runtime_encoder_spec()
+            dec_bufs, dec_weights, dec_dims = frontend._runtime_decoder_spec()
+            noise = torch.randn_like(frontend._g_noise)
+
+            def embed():
+                frontend._patch_embed_ops(stream.cuda_stream, uint8_input=True)
+                module.siglip_forward(frontend._gemm, module.fvk, frontend._sig_bufs,
+                                      frontend._sig_weights, frontend._sig_dims,
+                                      stream=stream.cuda_stream, attn=frontend._attn,
+                                      use_fp8=frontend.use_fp8)
+                frontend._postln_project_ops(stream.cuda_stream)
+
+            def encode():
+                frontend._Kc.zero_()
+                frontend._Vc.zero_()
+                module.encoder_forward(frontend._gemm, module.fvk, enc_bufs, enc_weights,
+                                       enc_dims, stream=stream.cuda_stream, attn=frontend._attn,
+                                       use_fp8=frontend.use_fp8)
+
+            def decode():
+                frontend._g_noise.copy_(noise)
+                module.decoder_forward(frontend._ctx, module.fvk, dec_bufs, dec_weights,
+                                       dec_dims, stream=stream.cuda_stream, attn=frontend._attn,
+                                       use_fp8=frontend.use_fp8)
+        else:
+            pipeline = frontend.pipeline
+            noise = torch.randn_like(frontend._noise_buf)
+
+            def embed():
+                pipeline.vision_encoder(stream=stream.cuda_stream)
+
+            def encode():
+                pipeline._copy_lang_embeds_to_encoder_x(stream=stream.cuda_stream)
+                pipeline.transformer_encoder(stream=stream.cuda_stream)
+
+            def decode():
+                frontend._copy_tensor_to_pipeline_buf_stream(noise, pipeline.input_noise_buf, stream.cuda_stream)
+                pipeline.transformer_decoder(stream=stream.cuda_stream)
+
+        stream.synchronize()
+        return _prepare_stage_targets({'embed': embed, 'encode': encode, 'decode': decode},
+                                      torch, stream, use_cuda_graph=self.config.use_cuda_graph)
 
     def preprocess(self, observations):
         if not observations:

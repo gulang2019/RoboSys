@@ -1,4 +1,4 @@
-"""Wall-clock latency and sampled GPU energy for individual iterations."""
+"""Wall-clock latency, sampled GPU energy, and peak additional CUDA allocation."""
 
 from contextlib import contextmanager
 from dataclasses import replace
@@ -19,6 +19,11 @@ class Profiler:
     Short iterations may be below the telemetry refresh interval. Unsupported
     telemetry produces NaN energy while retaining latency measurements.
 
+    Memory is peak additional Torch CUDA allocation per tick, in decimal GB.
+    Existing weights, inputs, caches and graph pools are excluded; graph replay
+    may report zero. Non-Torch allocations are not tracked; CPU reports NaN.
+    Memory sampling and peak resets happen outside the timed interval.
+
     Optional callbacks supply power in watts, synchronization, and time in
     seconds. Defaults use the current Torch CUDA device when available; CPU
     measurements have no energy telemetry. Telemetry reads and bookkeeping are
@@ -33,6 +38,7 @@ class Profiler:
         self._active = False
         self.energies = []
         self.latencies = []
+        self.memories = []
 
     @contextmanager
     def measure(self, stream=None):
@@ -53,24 +59,33 @@ class Profiler:
         self.latencies = []
         self._power = self._power_callback
         self._synchronize = self._sync_callback or (stream.synchronize if stream is not None else None)
-        if self._power is None or self._synchronize is None:
-            try:
-                import torch
-            except ImportError:
-                torch = None
-            if torch is not None and torch.cuda.is_available():
-                device = stream.device if stream is not None else torch.cuda.current_device()
-                if self._power is None:
-                    self._power = lambda: power_draw_w(torch, device)
-                if self._synchronize is None:
-                    self._synchronize = lambda: torch.cuda.synchronize(device)
+        self.memories = []
+        self._cuda = None
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None and torch.cuda.is_available():
+            self._cuda = torch.cuda
+            device = stream.device if stream is not None else torch.cuda.current_device()
+            self._device = device
+            if self._power is None:
+                self._power = lambda: power_draw_w(torch, device)
+            if self._synchronize is None:
+                self._synchronize = lambda: torch.cuda.synchronize(device)
         if self._synchronize is None:
             self._synchronize = lambda: None
         self._synchronize()
         self._previous_power = self._read_power()
+        self._reset_memory()
         self._start = self._clock()
         self._active = True
         return self
+
+    def _reset_memory(self):
+        if self._cuda is not None:
+            self._memory_baseline = self._cuda.memory_allocated(self._device)
+            self._cuda.reset_peak_memory_stats(self._device)
 
     def _read_power(self):
         if self._power is None:
@@ -88,15 +103,20 @@ class Profiler:
         elapsed = self._clock() - self._start
         if not isfinite(elapsed) or elapsed < 0:
             raise ValueError("Profiler clock must be finite and monotonic")
+        memory = float("nan") if self._cuda is None else max(
+            0, self._cuda.max_memory_allocated(self._device) - self._memory_baseline) / 1e9
         power = self._read_power()
         self.latencies.append(elapsed * 1000)
         self.energies.append((self._previous_power + power) / 2 * elapsed)
+        self.memories.append(memory)
         self._previous_power = power
+        self._reset_memory()
         self._start = self._clock()
 
     def __exit__(self, exc_type, exc_value, traceback):
         # Only explicit ticks commit samples; a failed/unfinished call is omitted.
         self._active = False
+        self._cuda = None
         self._synchronize = None
         self._power = None
         return False

@@ -33,12 +33,25 @@ class VLABasePolicy:
         actions = self.postprocess(actions)
         return actions
 
-    def make_example_input(self) -> InferenceRequest:
+    def make_example_input(self, bsz: int, stage = 'all') -> tuple | object:
         import numpy as np
-        # TODO: figure out how to support 1/3 views
-        return InferenceRequest(observation={
-            'observation/image': np.zeros((int(self.config.image_resolution), int(self.config.image_resolution), 3), dtype=np.uint8),
-            'observation/wrist_image': np.zeros((int(self.config.image_resolution), int(self.config.image_resolution), 3), dtype=np.uint8),
+
+        requests = [InferenceRequest(observation={
+            'observation/image': np.zeros((224, 224, 3), dtype=np.uint8),
+            'observation/wrist_image': np.zeros((224, 224, 3), dtype=np.uint8),
             'observation/state': np.zeros(8, dtype=np.float32),
             'prompt': 'do something useful',
-        })
+        }) for _ in range(bsz)]
+        observation = self.preprocess(requests)
+        embedding = self.embed(observation)
+        context = self.encode(embedding)
+        decoded = self.decode(context)
+        if stage == 'all':
+            return requests, observation, embedding, context, decoded, self.postprocess(decoded)
+        return {
+            'preprocess': requests, 
+            'embed': observation,
+            'encode': embedding,
+            'decode': context, 
+            'postprocess': decoded
+        }.get(stage, None)

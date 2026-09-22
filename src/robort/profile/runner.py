@@ -1,109 +1,128 @@
 """Profile the public five-stage policy interface in dependency order."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack
 from copy import deepcopy
+from math import ceil
+from dataclasses import asdict
+import gc
+import numpy as np
+import torch
 
 from robort.profile.schemas import HardwareConfig, HardwareProfile, PolicyConfig, PolicyProfile, RunnerConfig, StageProfile
 from robort.profile.profiler import Profiler
 from robort.profile.hardware import profile_hardware, prepare_hardware_env
-from robort.profile.environment import validate_hardware_config
-from robort.profile.policy_cache import PolicyCache
-
+from robort.profile.environment import validate_hardware_config, _green_stream
+from ..policies.vla_base import VLABasePolicy
+import tqdm
 
 class Runner:
-    """Reusable, synchronous profiler. Call close() to evict resident models."""
+    """Synchronous profiler reusing one resident policy per initialized backend."""
+
+    stages = ('preprocess', 'embed', 'encode', 'decode', 'postprocess')
 
     def __init__(self, args: RunnerConfig):
         self.args = args
         self.profiler = Profiler()
-        self.policy_cache = PolicyCache()
+        self.backends = {}
+        self._configs = {}
+        self._compilers = {}
+        self._streams = {}
+        self._resources = ExitStack()
 
     def profile_hardware(self, hardware_config: HardwareConfig) -> HardwareProfile:
         return profile_hardware(hardware_config)
 
-    @contextmanager
-    def _execution(self, config, stream, sizes):
-        policy, compiled = self.policy_cache.get(config, stream.device, sizes)
-        if config.use_cuda_graph:
-            if config.backend == 'openpi':
-                from robort.policies.openpi_cuda_graph import CudaGraphOpenPIPolicy
-                execution = CudaGraphOpenPIPolicy(
-                    policy, stream, batch_sizes=sizes, compiled_stages=compiled)
-            elif config.backend in ('flash_rt', 'flashrt'):
-                from robort.policies.flash_rt_cuda_graph import CudaGraphFlashRTPolicy
-                execution = CudaGraphFlashRTPolicy(policy, stream)
-            else:
-                raise NotImplementedError(
-                    f'CUDA graph profiling does not support backend {config.backend!r}')
-            with execution as graphed:
-                yield graphed
-        else:
-            yield policy
+    def init_backend(self, policy_config, hardware_configs):
+        """Load once and capture all batch/stream combinations before benchmarking."""
+        import torch
+        from robort.policies import create_policy
 
-    @staticmethod
-    def make_model_functions(policy, batch_size):
-        """Ordered calls sharing live outputs; native handles are never copied."""
-        inputs = [policy.make_example_input() for _ in range(batch_size)]
-        values = {}
-
-        def preprocess():
-            values.clear()
-            values['observation'] = policy.preprocess(inputs)
-
-        def embed():
-            values['embedding'] = policy.embed(values.pop('observation'))
-
-        def encode():
-            values['context'] = policy.encode(values.pop('embedding'))
-
-        def decode():
-            values['actions'] = policy.decode(values.pop('context'))
-
-        def postprocess():
-            values['responses'] = policy.postprocess(values.pop('actions'))
-
-        return dict(preprocess=preprocess, embed=embed, encode=encode,
-                    decode=decode, postprocess=postprocess)
-
-    def _profile_batch(self, policy, size, hardware_config, policy_config, stream):
-        model_fns = self.make_model_functions(policy, size)
-        model_fn = None
+        config = deepcopy(policy_config)
+        if config.backend in self.backends:
+            previous_compiler = self._compilers.pop(config.backend, None)
+            if previous_compiler is not None:
+                previous_compiler.close()
+            del self.backends[config.backend]
+            self._configs.pop(config.backend, None)
+            gc.collect()
+        if config.use_cuda_graph and config.backend not in ('openpi', 'flash_rt', 'flashrt'):
+            raise NotImplementedError('The Torch compiler currently supports OpenPI only')
+        devices = {hw._device_index for hw in hardware_configs}
+        if len(devices) != 1:
+            raise ValueError('A resident backend requires one CUDA device')
+        device = torch.device('cuda', devices.pop())
+        config.model_dir = config.model_dir or f'checkpoints/{config.model_name}_pytorch'
+        streams = {}
+        for hw in hardware_configs:
+            validate_hardware_config(hw)
+            key = (hw._device_index, hw.sm_perc)
+            if key not in self._streams:
+                self._streams[key] = self._resources.enter_context(
+                    _green_stream(torch, hw._device_index, ceil(hw.num_sms * hw.sm_perc)))
+            streams[key] = self._streams[key]
+        compiler = None
         try:
-            if not model_fns:
-                raise ValueError('Policy returned no profiling stages')
-            # Initialize lazy eager state even when num_warmup=0.
-            for _ in range(max(1, self.args.num_warmup)):
-                for model_fn in model_fns.values():
-                    model_fn()
-            samples = {name: ([], []) for name in model_fns}
-            for _ in range(self.args.num_iter):
-                for name, model_fn in model_fns.items():
-                    with self.profiler.measure(stream=stream) as p:
-                        model_fn()
-                        p.tick()
-                    latencies, energies = samples[name]
-                    latencies.extend(p.latencies)
-                    energies.extend(p.energies)
-            config = deepcopy(policy_config)
-            config.batch_sizes = [size]
-            result = PolicyProfile(deepcopy(hardware_config), config, {})
-            metadata = StageProfile(*([float('nan')] * 8))
-            for name, (latencies, energies) in samples.items():
-                self.profiler.latencies = latencies
-                self.profiler.energies = energies
-                result.stages[name] = self.profiler.to_profile(metadata)
-            return result
-        finally:
-            model_fn = None
-            model_fns.clear()
+            with torch.cuda.device(device), torch.cuda.stream(torch.cuda.default_stream(device)):
+                policy = create_policy(config, device=str(device))
+                if config.use_cuda_graph and config.backend == 'openpi':
+                    from robort.policies.compiler_utils import Compiler
+                    compiler = Compiler(device=device, streams=list(streams.values()),
+                                        use_torch_compile=config.use_torch_compile)
+                    policy = compiler.compile(policy)
+                torch.cuda.current_stream().synchronize()
+        except BaseException:
+            if compiler is not None:
+                compiler.close()
+            raise
+        self.backends[config.backend] = policy
+        self._configs[config.backend] = deepcopy(config)
+        if compiler is not None:
+            self._compilers[config.backend] = compiler
 
-    def profile_policy(self, hardware_config: HardwareConfig,
-                       policy_config: PolicyConfig) -> dict[int, PolicyProfile]:
-        """Return one five-stage profile per configured batch size (default [1]).
+
+    @torch.inference_mode()
+    def _profile_batch(self, policy: VLABasePolicy, hardware_config: HardwareConfig, stream):
+        policy_profile = PolicyProfile(deepcopy(hardware_config), deepcopy(policy.config), {})
+        with ExitStack() as cleanup:
+            targets = None
+            if policy.config.backend in ('flash_rt', 'flashrt'):
+                targets = policy.profile_functions(stream)
+                for target in targets.values():
+                    cleanup.callback(target.close)
+            for stage, batch_sizes in tqdm.tqdm(policy.config.batch_sizes.items(), desc='Stages'):
+                if stage not in self.stages:
+                    raise ValueError(f'Unknown profiling stage: {stage}')
+                stage_profile = StageProfile()
+                for bsz in tqdm.tqdm(batch_sizes, desc=f'{stage} batch sizes'):
+                    if type(bsz) is not int or bsz < 1:
+                        raise ValueError('batch_sizes must contain positive integers')
+                    if targets is not None:
+                        model_fn = targets[stage]
+                    else:
+                        example_input = policy.make_example_input(bsz, stage=stage)
+                        model_fn = lambda: getattr(policy, stage)(example_input)
+                    for _ in range(max(1, self.args.num_warmup)):
+                        model_fn()
+                    with self.profiler.measure(stream=stream) as p:
+                        for _ in range(self.args.num_iter):
+                            model_fn()
+                            p.tick()
+                    stage_profile.lat[bsz] = (float(np.mean(p.latencies)), float(np.std(p.latencies)))
+                    stage_profile.energy[bsz] = (float(np.mean(p.energies)), float(np.std(p.energies)))
+                    stage_profile.mem_fp_activation_gb[bsz] = (
+                        (float('nan'), float('nan')) if targets is not None else
+                        (float(np.mean(p.memories)), float(np.std(p.memories))))
+                policy_profile.stages[stage] = stage_profile
+        return policy_profile
+
+    def profile_policy(self,
+                       hardware_config: HardwareConfig,
+                       policy_config: PolicyConfig) -> PolicyProfile:
+        """Return selected stage measurements per batch size (default [1]).
 
         Model loading, compilation, capture and warmup are outside measurement.
-        Models/compiled functions persist in policy_cache; graphs are recreated
-        on each green stream and closed before its destruction. Timings include
+        Policies, compiled graphs and streams persist across runs until close().
+        Timings include
         public-method CPU work/transfers/synchronization. Unknown metadata is NaN.
         """
         validate_hardware_config(hardware_config)
@@ -111,9 +130,6 @@ class Runner:
             value = getattr(self.args, name)
             if type(value) is not int or value < minimum:
                 raise ValueError(f"{name} must be an integer >= {minimum}")
-        sizes = policy_config.batch_sizes if policy_config.batch_sizes is not None else [1]
-        if not sizes or any(type(n) is not int or not 1 <= n <= policy_config.max_batch_size for n in sizes):
-            raise ValueError('batch_sizes must contain positive integers <= max_batch_size')
         if type(policy_config.use_cuda_graph) is not bool:
             raise ValueError('use_cuda_graph must be a boolean')
         if (policy_config.use_cuda_graph
@@ -121,17 +137,32 @@ class Runner:
             raise NotImplementedError(
                 f'CUDA graph profiling does not support backend {policy_config.backend!r}')
         config = deepcopy(policy_config)
-        sizes = sorted(set(sizes))
-        with prepare_hardware_env(hardware_config) as stream:
+        if config.model_dir is None:
+            config.model_dir = f"checkpoints/{config.model_name}_pytorch"
+        if config.backend not in self.backends:
+            raise ValueError(f'Call init_backend for {config.backend!r} before profiling')
+        initialized = self._configs[config.backend]
+        for name, value in asdict(config).items():
+            if name not in ('batch_sizes', 'max_batch_size') and value != getattr(initialized, name):
+                raise ValueError(f'{name} differs from the initialized {config.backend} policy')
+        policy = self.backends[config.backend]
+        stream = self._streams[(hardware_config._device_index, hardware_config.sm_perc)]
+        with prepare_hardware_env(hardware_config, stream=stream):
             try:
-                with self._execution(config, stream, sizes) as policy:
-                    return {size: self._profile_batch(policy, size, hardware_config, config, stream)
-                            for size in sizes}
+                return self._profile_batch(policy, hardware_config, stream)
             finally:
                 stream.synchronize()
 
     def close(self):
-        self.policy_cache.close()
+        try:
+            for compiler in self._compilers.values():
+                compiler.close()
+        finally:
+            self._compilers.clear()
+            self.backends.clear()
+            self._configs.clear()
+            self._resources.close()
+            self._streams.clear()
 
     def __enter__(self):
         return self

@@ -8,8 +8,8 @@ from ..policies import PolicyConfig
 
 @dataclass
 class RunnerConfig:
-    num_warmup: int = 10
-    num_iter: int = 100
+    num_warmup: int = 3
+    num_iter: int = 20
     output_dir: str = "profile"
 
 @dataclass
@@ -91,14 +91,14 @@ class StageProfile:
     Standard deviations use the population convention. Unmeasured statistics
     and unavailable memory measurements are NaN.
     """
-    num_params: int
-    flops: int
-    mem_fp_weight_gb: float
-    mem_fp_activation_gb: float
-    lat_mean: float
-    lat_std: float
-    energy_mean: float
-    energy_std: float
+    num_params: int = None 
+    flops: int = None 
+    mem_fp_weight_gb: float = None 
+    # Peak additional Torch CUDA allocation per call (decimal GB); excludes
+    # preallocated inputs/caches/graph pools and non-Torch native allocations.
+    mem_fp_activation_gb: dict[int, tuple[float, float]] = field(default_factory = dict)
+    lat: dict[int, tuple[float, float]] = field(default_factory = dict) # batch size -> latency 
+    energy: dict[int, tuple[float, float]] = field(default_factory = dict) # batch size -> latency
 
 @dataclass
 class PolicyProfile:
