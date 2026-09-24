@@ -140,6 +140,18 @@ def test_power_apply_restore_and_stream_scope(devices, failure):
     devices.torch.cuda.device.assert_called_once_with(1)
 
 
+def test_supplied_stream_is_reused_without_destroying_it(devices):
+    config = HardwareConfig(0.8, 0.5)
+    devices.stream.device = devices.torch.device('cuda', config._device_index)
+    devices.events.clear()
+    for _ in range(2):
+        with prepare_hardware_env(config, stream=devices.stream) as stream:
+            assert stream is devices.stream
+            assert devices.current[0] == 360_000
+        assert devices.current[0] == 300_000
+    assert devices.events == [('power', 360_000), 'sync', ('power', 300_000), 'shutdown'] * 2
+
+
 def test_full_power_is_applied_and_restored(devices):
     with prepare_hardware_env(HardwareConfig(1, 1)):
         assert devices.current[0] == 450_000

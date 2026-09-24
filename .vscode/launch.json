@@ -1,0 +1,149 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Benchmark: Local OpenPI LIBERO spatial task 0",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "benchmark.libero",
+      "python": "${workspaceFolder}/.venv-openpi/bin/python",
+      "args": [
+        "--client-args", "{\"type\":\"local\",\"device\":\"cuda\",\"num_steps\":10,\"encode_keep_rate\":0.5}",
+        "--args.task-suite-name", "libero_spatial",
+        "--args.task-id", "0",
+        "--args.num-trials-per-task", "1",
+        "--args.results-path", "results/local/spatial_task0.json",
+        "--args.video-out-path", "results/local/spatial_task0_videos",
+        "--args.fail-on-error"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src:${workspaceFolder}/3rdparty/AutoHorizon/third_party/libero",
+        "LIBERO_CONFIG_PATH": "${workspaceFolder}/data/libero_config",
+        "MUJOCO_GL": "egl",
+        "JAX_PLATFORMS": "cpu"
+      }
+    },
+    {
+      "name": "Profile: RoboRT Pi0.5 (RTX 4090)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robort.profile.main",
+      "python": "${workspaceFolder}/.venv-openpi/bin/python",
+      "args": [
+        "--model-name", "pi05_libero",
+        "--num-steps", "1",
+        "--output-dir", "profile/rtx4090",
+        "--embed-batch-sizes", "1", "2", "4", "8",
+        "--encode-batch-sizes", "1", "2", "4",
+        "--decode-batch-sizes", "1", "2", "4", "8", "16", "32",
+        "--no-use-cuda-graph"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "JAX_PLATFORMS": "cpu",
+        "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
+      }
+    },
+    {
+      "name": "Inference: RoboRT OpenPI (GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/robort_inference.py",
+      "python": "${workspaceFolder}/.venv-openpi/bin/python",
+      "args": ["--backend", "openpi", "--batch-size", "1"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "JAX_PLATFORMS": "cpu",
+        "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
+      }
+    },
+    {
+      "name": "Inference: RoboRT Compiler",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/robort_inference_compiler.py",
+      "python": "${workspaceFolder}/.venv-openpi/bin/python",
+      "args": ["--backend", "openpi", "--batch-sizes", "1", "2", "4", "8", "16"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "JAX_PLATFORMS": "cpu",
+        "PYTHONPATH": "${workspaceFolder}/src:${env:PYTHONPATH}"
+      }
+    },
+    {
+      "name": "Inference: OpenPI Pi0.5 trace Armory source (GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inference/openpi_infer.py",
+      "python": "${workspaceFolder}/.venv-openpi/bin/python",
+      "args": ["--break-before-infer", "--num-steps", "1"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {"CUDA_VISIBLE_DEVICES": "0", "JAX_PLATFORMS": "cpu"}
+    },
+    {
+      "name": "Inference: FlashRT Pi0.5 FP16 (GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inference/flashrt_infer.py",
+      "python": "${workspaceFolder}/.venv-profile/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_HOME": "/usr/local/cuda-12.8",
+        "LD_LIBRARY_PATH": "/usr/local/cuda-12.8/lib64:${env:LD_LIBRARY_PATH}"
+      }
+    },
+    {
+      "name": "Inference: FlashRT Pi0.5 BF16 batch B=2 (GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inference/flashrt_batch_infer.py",
+      "python": "${workspaceFolder}/.venv-profile/bin/python",
+      "args": ["--break-before-infer"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_HOME": "/usr/local/cuda-12.8",
+        "LD_LIBRARY_PATH": "/usr/local/cuda-12.8/lib64:${env:LD_LIBRARY_PATH}"
+      }
+    },
+    {
+      "name": "Inference: GR00T N1.7 LIBERO (GPU)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inference/groot_infer.py",
+      "python": "${workspaceFolder}/3rdparty/armory/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": ["--checkpoint", "${input:grootCheckpoint}"],
+      "env": {"CUDA_VISIBLE_DEVICES": "0"}
+    }
+  ],
+  "inputs": [
+    {
+      "id": "grootCheckpoint",
+      "type": "promptString",
+      "description": "Local GR00T N1.7 LIBERO checkpoint directory containing config.json",
+      "default": "checkpoints/GR00T-N1.7-LIBERO/libero_10"
+    }
+  ]
+}

@@ -10,6 +10,34 @@ from robort.profile.policies import FlashRTBackend
 from robort.profile.schemas import HardwareConfig, HardwareProfile, PolicyConfig, PolicyProfile, RunnerConfig, StageProfile
 
 
+def test_sweep_initializes_each_backend_once(tmp_path, monkeypatch):
+    def initialize(config):
+        config.hardware_name = 'test'
+        config.num_sms = 16
+        config.mem_cap_gb = 8
+        config.max_power_w = 100
+
+    monkeypatch.setattr(HardwareConfig, '__post_init__', initialize)
+    runner = Mock()
+    runner.profile_hardware.side_effect = RuntimeError('skip hardware')
+    runner.profile_policy.return_value = {}
+    monkeypatch.setattr(sweep, 'Runner', lambda _: runner)
+    policy = PolicyConfig(batch_sizes=[1])
+    choices = {field.name: [getattr(policy, field.name)] for field in fields(PolicyConfig)}
+    choices.update(backend=['openpi', 'flash_rt'], batch_sizes=[[1], [2]])
+    sweep.main(RunnerConfig(output_dir=str(tmp_path)),
+               {'power_perc': [1.0, 0.8], 'sm_perc': [0.5, 1.0]}, choices)
+    assert runner.init_backend.call_count == 2
+    assert [call.args[0].backend for call in runner.init_backend.call_args_list] == ['openpi', 'flash_rt']
+    for call in runner.init_backend.call_args_list:
+        assert len(call.args[1]) == 4
+        assert call.args[2] == [1, 2]
+    assert runner.profile_policy.call_count == 16
+    calls = [call[0] for call in runner.mock_calls]
+    assert max(i for i, name in enumerate(calls) if name == 'init_backend') < calls.index('profile_policy')
+    runner.close.assert_called_once()
+
+
 def test_default_policies_are_supported():
     names, values = zip(*sweep.POLICY_CHOICES)
     for choices in product(*values):

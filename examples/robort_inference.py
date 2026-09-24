@@ -28,7 +28,7 @@ def main():
 
     policy_config = PolicyConfig(
         model_dir=str(args.checkpoint), num_steps=args.num_steps,
-        batch_sizes=[args.batch_size], max_batch_size=args.batch_size,
+        batch_sizes={'encode': [args.batch_size], 'decode': [args.batch_size], 'embed': [args.batch_size]},
         backend=args.backend, use_cuda_graph=False,
     )
     policy = create_policy(policy_config, device=args.device)

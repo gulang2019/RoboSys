@@ -17,7 +17,7 @@ def stage_metadata(params=100):
 
 
 def hardware(power=1, sm=1):
-    return SimpleNamespace(power_perc=power, sm_perc=sm)
+    return SimpleNamespace(power_perc=power, sm_perc=sm, _device_index=0, num_sms=16)
 
 
 class Clock:
@@ -143,7 +143,7 @@ def experiment(monkeypatch):
     stream = Mock()
 
     @contextmanager
-    def environment(config):
+    def environment(config, stream=None):
         events.append('enter')
         try:
             yield stream
@@ -152,13 +152,13 @@ def experiment(monkeypatch):
 
     monkeypatch.setattr('robort.profile.runner.prepare_hardware_env', environment)
     runner._test_policy = object()
-    @contextmanager
-    def execution(*args):
-        yield runner._test_policy
-    runner._execution = execution
     runner.make_model_functions = Mock(side_effect=lambda *args: dict(targets))
     runner._test_events, runner._test_stream, runner._test_calls = events, stream, calls
-    config = PolicyConfig(backend='flash_rt', use_cuda_graph=False)
+    config = PolicyConfig(backend='flash_rt', use_cuda_graph=False, batch_sizes=[1],
+                          model_dir='checkpoints/pi05_libero_pytorch')
+    runner.backends['flash_rt'] = runner._test_policy
+    runner._configs['flash_rt'] = config
+    runner._streams[(0, 1)] = stream
     return runner, targets, config
 
 
@@ -228,23 +228,12 @@ def test_preparation_failure_is_not_masked(experiment):
     runner._test_stream.synchronize.assert_called_once()
 
 
-def test_flashrt_graph_request_uses_graph_execution(experiment):
+def test_flashrt_graph_request_rejects_torch_compilation(experiment):
     _, _, config = experiment
     config.use_cuda_graph = True
-    runner = Runner(RunnerConfig())
-    runner.policy_cache = Mock()
-    policy = object()
-    runner.policy_cache.get.return_value = policy, None
-    stream = Mock(device='cuda:0')
-    graph = Mock()
-    graph.__enter__ = Mock(return_value=graph)
-    graph.__exit__ = Mock(return_value=False)
-    with patch('robort.policies.flash_rt_cuda_graph.CudaGraphFlashRTPolicy',
-               return_value=graph) as wrapper:
-        with runner._execution(config, stream, [1]) as execution:
-            assert execution is graph
-    wrapper.assert_called_once_with(policy, stream)
-    graph.__exit__.assert_called_once()
+    with pytest.raises(NotImplementedError, match='OpenPI only'):
+        Runner(RunnerConfig()).init_backend(config, [hardware()], [1])
+
 
 
 def test_zero_warmup_still_initializes_outside_timing(experiment):
@@ -263,8 +252,8 @@ def test_native_outputs_are_passed_by_identity_and_released(monkeypatch):
         def __deepcopy__(self, memo):
             raise AssertionError('Native handles must not be copied')
     class Policy:
-        def make_example_input(self):
-            return [Handle()]
+        def make_example_input(self, bsz):
+            return [Handle() for _ in range(bsz)], None, None, None, None, None
         def preprocess(self, inputs):
             active[:] = [Handle()]
             return active[0]
@@ -319,3 +308,23 @@ def test_profiles_each_batch_size_separately(experiment):
     assert config.batch_sizes == [2, 1, 2]
     assert runner._test_calls == list(targets) * 10
     assert [call.args[1] for call in runner.make_model_functions.call_args_list] == [1, 2]
+
+
+def test_stage_batch_sizes_select_measurements(experiment):
+    runner, targets, config = experiment
+    runner.args.stage_batch_sizes = {'embed': [2, 3], 'decode': [1, 2]}
+    assert runner.args.batch_sizes(config) == [1, 2, 3]
+    initialized = PolicyConfig(**asdict(config))
+    initialized.batch_sizes = [1, 2, 3]
+    runner._configs[config.backend] = initialized
+    profiles = runner.profile_policy(hardware(), config)
+    assert set(profiles[1].stages) == {'preprocess', 'encode', 'decode', 'postprocess'}
+    assert set(profiles[2].stages) == {'embed', 'decode'}
+    assert set(profiles[3].stages) == {'embed'}
+    assert all(profile.stages['embed'].lat_mean == 2000 for profile in (profiles[2], profiles[3]))
+
+
+@pytest.mark.parametrize('overrides', [{'unknown': [1]}, {'embed': []}, {'decode': [0]}, {'encode': [11]}])
+def test_invalid_stage_batch_sizes(overrides):
+    with pytest.raises(ValueError):
+        RunnerConfig(stage_batch_sizes=overrides).batch_sizes(PolicyConfig())

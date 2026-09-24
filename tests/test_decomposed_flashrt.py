@@ -106,7 +106,7 @@ def test_gpu_parity_with_native_pipeline():
         np.testing.assert_allclose(outputs["actions"], native, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize('sizes', [None, [1]])
+@pytest.mark.parametrize('sizes', [None, [1], {'embed': [1], 'encode': [1], 'decode': [1]}])
 def test_constructor_accepts_single_batch_config_before_cuda_check(sizes):
     with pytest.raises(RuntimeError, match='requires CUDA'):
         FlashRTPolicy(PolicyConfig(batch_sizes=sizes, precision='fp16'), device='cpu')

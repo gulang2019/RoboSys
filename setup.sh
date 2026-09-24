@@ -4,12 +4,15 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "${1:-}" == --help ]]; then
     cat <<'HELP'
-Usage: bash setup.sh
+Usage: bash setup.sh [--openpi-libero]
 
 Initialize pinned Git dependencies, apply benchmark patches, install Python
 3.11 and the locked Armory environment, configure LIBERO, download pi05_libero,
 build the OpenPI and FlashRT profiling environments, and check imports/initial
-states. Does not launch the sweep.
+states. Also installs LIBERO into .venv-openpi for local PyTorch evaluation.
+Does not launch the sweep.
+Use --openpi-libero to add and verify simulator dependencies in an existing
+.venv-openpi with an existing LIBERO checkout, without rebuilding other environments.
 Run after cloning RoboSys; requires Linux, internet and an NVIDIA CUDA 12 driver.
 Do not run while inference or benchmarks are using these environments.
 
@@ -25,6 +28,9 @@ Environment options:
   LIBERO_CONFIG_PATH=...  Config directory (default: data/libero_config).
 HELP
     exit 0
+fi
+if [[ "${1:-}" == --openpi-libero && $# == 1 ]]; then
+    exec bash "$ROOT/scripts/benchmark/setup-openpi-libero.sh"
 fi
 [[ $# == 0 ]] || { echo 'Use --help for usage.' >&2; exit 1; }
 [[ "$(uname -s)" == Linux ]] || { echo 'This setup targets Linux/CUDA.' >&2; exit 1; }
@@ -133,6 +139,9 @@ for name in ('libero_spatial', 'libero_object', 'libero_goal', 'libero_10', 'lib
 print('FFmpeg:', imageio_ffmpeg.get_ffmpeg_exe())
 PY
 bash "$ROOT/scripts/profile/setup.sh"
+if [[ "${INSTALL_OPENPI:-1}" != 0 ]]; then
+    bash "$ROOT/scripts/benchmark/setup-openpi-libero.sh"
+fi
 printf '\nSetup complete. Launch the sweep:\n'
 printf 'cd %q\n' "$ROOT"
 printf 'LIBERO_CONFIG_PATH=%q CKPT_DIR=%q bash benchmark/suc_rate_profile.sh\n' \
