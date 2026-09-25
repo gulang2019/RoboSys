@@ -87,6 +87,9 @@ PROFILE_ENV="$ROOT/.venv-profile"
 uv pip sync --python "$PROFILE_ENV/bin/python" --torch-backend cu128 \
     scripts/profile/requirements-cu128.txt
 uv pip check --python "$PROFILE_ENV/bin/python"
+# FlashRT can tokenize without OpenPI, but needs the standalone model file.
+bash "$FLASHRT/scripts/download_paligemma_tokenizer.sh"
+"$PROFILE_ENV/bin/python" -c 'from flash_rt.utils.paligemma_tokenizer import load_paligemma_sentencepiece; load_paligemma_sentencepiece()'
 if [[ "${INSTALL_OPENPI:-1}" != 0 ]]; then
     OPENPI="$ROOT/3rdparty/openpi"
     if [[ ! -e "$OPENPI" ]]; then
@@ -100,7 +103,7 @@ if [[ "${INSTALL_OPENPI:-1}" != 0 ]]; then
     UV_PROJECT_ENVIRONMENT="$ROOT/.venv-openpi" GIT_LFS_SKIP_SMUDGE=1 \
         uv sync --project "$OPENPI" --python 3.11 --frozen --no-dev
     # OpenPI's gemma_pytorch.py imports pytest for its cache type annotation.
-    uv pip install --python "$ROOT/.venv-openpi/bin/python" \
+    uv pip install --python "$ROOT/.venv-openpi/bin/python" --torch-backend cu128 \
         -r "$ROOT/scripts/profile/requirements-openpi.txt"
     uv pip check --python "$ROOT/.venv-openpi/bin/python"
     "$ROOT/.venv-openpi/bin/python" - "$OPENPI" <<'PY'
@@ -122,6 +125,17 @@ for source in patches.rglob("*.py"):
         shutil.copy2(source, staged)
         staged.replace(target)
 print("OpenPI Transformers patches installed")
+# Some driver installs provide only libcuda.so.1. Triton links with -lcuda
+# and always searches its own backend library directory first.
+driver = Path("/lib/x86_64-linux-gnu/libcuda.so.1")
+if driver.is_file():
+    import triton
+    link = Path(triton.__file__).parent / "backends/nvidia/lib/libcuda.so"
+    if not link.exists():
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(driver)
+    print("Triton CUDA driver link:", link)
 PY
     JAX_PLATFORMS=cpu "$ROOT/.venv-openpi/bin/python" \
         "$ROOT/scripts/convert_jax_model_to_pytorch.py" --help >/dev/null
@@ -136,6 +150,13 @@ PY
     fi
 fi
 if [[ "${BUILD_FLASHRT:-1}" != 0 ]]; then
+    patch="$ROOT/patches/flashrt-sm120-dynamic-shared-memory.patch"
+    if git -C "$FLASHRT" apply --check "$patch" 2>/dev/null; then
+        git -C "$FLASHRT" apply "$patch"
+    elif ! git -C "$FLASHRT" apply --reverse --check "$patch" 2>/dev/null; then
+        echo 'Cannot apply FlashRT SM120 shared-memory fix: incompatible checkout edits.' >&2
+        exit 1
+    fi
     if [[ ! -e "$FLASHRT/third_party/cutlass" ]]; then
         git clone --depth 1 --branch v4.4.2 https://github.com/NVIDIA/cutlass.git \
             "$FLASHRT/third_party/cutlass"
@@ -144,6 +165,7 @@ if [[ "${BUILD_FLASHRT:-1}" != 0 ]]; then
         -DCMAKE_MAKE_PROGRAM="$PROFILE_ENV/bin/ninja" \
         -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc" \
         -DFA2_ARCH_NATIVE_ONLY=ON \
+        -DFLASHRT_ENABLE_MOTUS=OFF \
         -DPython3_EXECUTABLE="$PROFILE_ENV/bin/python" -DGPU_ARCH="${GPU_ARCH:-89}"
     "$PROFILE_ENV/bin/cmake" --build "$FLASHRT/build-profile" --parallel "${BUILD_JOBS:-4}"
     "$PROFILE_ENV/bin/python" -c 'from flash_rt.frontends.torch.pi05_rtx_fp16 import Pi05TorchFrontendRtxFP16; from flash_rt.frontends.torch.pi05_rtx import Pi05TorchFrontendRtx'
