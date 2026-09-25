@@ -1,82 +1,79 @@
-# GPU profiling
+# FlashRT GPU profiling
 
-`Runner.profile_policy(hardware, policy)` returns `{batch_size: PolicyProfile}`
-for every size in `policy.batch_sizes` (default `[1]`). Each result contains
-`preprocess`, `embed`, `encode`, `decode` and `postprocess` stage measurements.
-The policy CSV contains one row per configuration, scalar `batch_size`, and stage.
-Existing singleton `batch_sizes` CSV values are migrated when results are merged.
+The runner currently supports the BF16 Pi0.5 LIBERO FlashRT backend on RTX
+SM89/SM120, with two 224×224 views. Use `backend="flash_rt"`.
 
 ```python
 from robort.profile.runner import Runner
 from robort.profile.schemas import HardwareConfig, PolicyConfig, RunnerConfig
 
 policy = PolicyConfig(
-    backend="openpi", model_dir="checkpoints/pi05_libero_pytorch",
-    batch_sizes=[1, 2], num_steps=10, use_cuda_graph=True,
+    backend="flash_rt", precision="bf16",
+    model_dir="checkpoints/pi05_libero_pytorch",
+    batch_sizes={"embed": [1, 2], "encode": [1], "decode": [1, 4]},
+    use_cuda_graph=True,
 )
+hardware = [HardwareConfig(1.0, 1.0), HardwareConfig(1.0, 0.5)]
 with Runner(RunnerConfig(num_warmup=3, num_iter=20)) as runner:
-    full = runner.profile_policy(HardwareConfig(1.0, 1.0), policy)
-    half = runner.profile_policy(HardwareConfig(1.0, 0.5), policy)
-    print(full[2].stages["decode"].lat_mean)  # milliseconds for batch size 2
+    runner.init_backend(policy, hardware)
+    for hw in hardware:
+        result = runner.profile_policy(hw, policy)
+        print(result.stages["decode"].lat[4])  # mean/std milliseconds
 ```
 
-## Model and compilation lifetime
+Initialization loads one policy and captures its batch-size variants on each
+unique device/SM-fraction stream. Power settings reuse these streams. All hardware
+configurations for a policy must refer to the same CUDA device. Initializing the
+next policy configuration drains and releases the previous policy before loading
+its replacement; green streams persist until `close()`.
 
-The runner owns a `PolicyCache`. It retains one checkpoint/device's model and
-compiled execution variants across calls. Changing power, SM fraction, batch size,
-or graph/eager selection does not reload the OpenPI model. Batch shapes reuse the
-same compiled functions; each new shape may need an initial compilation. A changed
-execution configuration (for example denoising steps) gets another compiled
-variant sharing the loaded weights. A changed checkpoint/model/device evicts the
-previous model. Configurations are copied, so caller mutations cannot corrupt
-existing variants. Checkpoint files replaced in place require `runner.close()`
-before the next call.
+`batch_sizes` maps stages to sizes. By default only the three GPU stages are
+measured, at B=1. Include `preprocess` or `postprocess` to measure the CPU stages.
+Missing GPU stages get a B=1 pipeline for input preparation. A profiling call can
+select a subset of initialized GPU sizes and can select CPU sizes independently.
 
-Loading and initial compilation occur on the device's default stream. Compiled
-functions and model storage therefore outlive each experiment's green stream.
-Each graph run creates a `CudaGraphOpenPIPolicy` using the cached compiled stages,
-captures fresh graphs on that run's green stream, and releases them before the
-stream/context is destroyed. The original `OpenPIPolicy` stays eager. Graph capture
-and warmup still occur per run, outside the measured samples; repeated identical
-runs reuse the Torch compiler results. Call `runner.close()` (or use its context
-manager) to release cache ownership. The runner is synchronous and not thread-safe.
+The runner generates each stage's inputs outside measurement, executing upstream
+stages in supported batches. Partial batches are padded and excess outputs are
+discarded. Thus decode at B=16 does not require encode or embed graphs at B=16.
+The runner retains intermediate tensors and completes input preparation before
+measurement. It serializes work and owns all synchronization; the backend does
+not manage dependency events.
 
-`use_cuda_graph=False` uses the cached eager policy. Graph profiling supports
-OpenPI and FlashRT on Thor SM110. OpenPI model precision, action horizon and
-image/token shapes come from its training configuration/transforms; the generic
-profile metadata fields do not override those model properties.
+## Measurements
 
-## Measurement conventions
+- Latency is public-stage wall time: host dispatch, input/output copies, compute,
+  and completion on the selected stream. It is not GPU graph-only latency.
+- Loading, autotuning, capture, input preparation, and warmup are excluded.
+- Each stage is measured independently. Stage means are not concurrent pipeline
+  throughput or an end-to-end request benchmark.
+- Memory is peak additional Torch CUDA allocation per call. Preallocated stage
+  buffers, weights, graph storage, and native GEMM workspaces are excluded.
+- Energy uses device-wide endpoint power samples. Short stages may be below the
+  telemetry refresh interval; unsupported readings produce NaN.
+- `HardwareConfig` binds to the current GPU. SM allocations follow CUDA green
+  context rounding; power limits are restored after each profiling run.
+- Close drains streams, releases graph handles and policies, then destroys green
+  streams. Model parameter/FLOP/weight-memory metadata is currently unavailable.
 
-- Each iteration executes all five stages in dependency order. Latencies include
-  Python dispatch, transfers and completion on the selected stream. Loading,
-  compilation, capture, warmup and telemetry overhead are excluded. These stage
-  means are not an end-to-end throughput measurement.
-- Model parameter/FLOP/memory metadata is currently NaN for this five-stage API.
-- Energy estimates use endpoint device-power samples, including idle power and
-  other GPU activity. Very short stages may be below the telemetry refresh rate.
-- `HardwareConfig` binds to the current GPU. Power fractions use the NVML default
-  power limit; SM fractions are rounded according to CUDA green-context rules.
-  Each run restores the previous power limit, including on failure.
-- First-time compilation can take minutes. Compilation may change floating-point
-  results relative to the original eager model; graph parity is checked against
-  the same compiled functions without capture.
+## Command line and tests
 
-## Environment and tests
-
-Use `.venv-openpi` with CUDA PyTorch, OpenPI and its checkpoint. Profiling also
-requires CUDA driver bindings and NVML (installed by `scripts/profile/setup.sh`):
+Set `LD_LIBRARY_PATH` before launching Python. Activating `.venv-profile` alone
+is insufficient: FlashRT loads the unversioned `libcudart.so` independently of
+PyTorch. On this machine, omitting the path selects CUDA 11.7 and can crash graph
+capture even though `torch.version.cuda` reports 12.8. The backend now checks this
+runtime mismatch before loading model weights.
 
 ```sh
-uv pip install --python .venv-openpi/bin/python cuda-python==12.9.7 nvidia-ml-py==13.610.43
-JAX_PLATFORMS=cpu .venv-openpi/bin/python -m pytest \
-  tests/test_policy_profile.py tests/test_profile_policy_cache.py tests/test_profile_sweep.py -q
-ROBORT_TEST_OPENPI_PROFILE=1 JAX_PLATFORMS=cpu .venv-openpi/bin/python -m pytest \
-  tests/test_openpi_profile_cache.py -q -s
+PYTHONPATH=src LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64 \
+  .venv-profile/bin/python -m robort.profile.main \
+  --backend flash_rt --precision bf16 --num-views 2 --image-resolution 224 \
+  --embed-batch-sizes 1 2 --encode-batch-sizes 1 --decode-batch-sizes 1 4 \
+  --sm-perc 1.0 0.5 --num-warmup 3 --num-iter 20
+
+LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64 ROBORT_TEST_FLASHRT_PROFILE=1 \
+  .venv-profile/bin/python -m pytest tests/test_flashrt_profile.py -q
 ```
 
-The real-checkpoint test profiles multiple batch sizes at full/half SM allocation,
-checks checkpoint load and compiler call counts, and verifies that Dynamo's count
-of compiled graphs does not increase across repeated hardware runs. It retains the
-current NVML power limit. The sweep entry point is `python -m robort.profile.main`;
-`--batch-sizes 1 2` produces separate CSV rows per batch size and stage.
+The sweep writes one CSV row per hardware configuration, policy configuration,
+stage and batch size. The opt-in GPU tests exercise eager and captured execution
+on full/half-SM green streams with the real checkpoint.
