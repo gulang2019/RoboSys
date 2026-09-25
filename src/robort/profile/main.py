@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZES = {
     'embed': [1,2,4,8],
-    'encode': [1,2],
-    'decode': [1,2,4,8,16]
+    'encode': [1,2,4,8],
+    'decode': [1,2,4,8,16,32]
 }
 
 HW_CHOICES = [
@@ -29,9 +29,9 @@ HW_CHOICES = [
 
 POLICY_CHOICES = [
     ('model_name', ['pi05_libero']),
-    ('backend', ['openpi']),
-    ('num_views', [1,2,3]),
-    ('image_resolution', [224,368,512]),
+    ('backend', ['flash_rt']),
+    ('num_views', [2]),
+    ('image_resolution', [224]),
     ('precision', ['bf16']),
     ('batch_sizes', [DEFAULT_BATCH_SIZES]),
     ('prompt_len', [10])

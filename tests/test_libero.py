@@ -100,7 +100,8 @@ def test_parallel_task_error_propagates(libero, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("use_rtc", [False, True])
-def test_episode_preprocessing_and_action_chunks(libero, monkeypatch, tmp_path, use_rtc):
+@pytest.mark.parametrize("local", [False, True])
+def test_episode_preprocessing_and_action_chunks(libero, monkeypatch, tmp_path, use_rtc, local):
     img = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
     obs = {"agentview_image": img, "robot0_eye_in_hand_image": img + 20,
            "robot0_eef_pos": np.array([1., 2., 3.]),
@@ -123,9 +124,12 @@ def test_episode_preprocessing_and_action_chunks(libero, monkeypatch, tmp_path, 
                        num_steps_wait=1, replan_steps=2, inference_delay=0,
                        resize_size=2, use_rtc=use_rtc, video_out_path=str(tmp_path))
 
-    result = libero.eval_one_task(args, suite, 5, 0)
+    result = libero.eval_one_task(args, suite, 5, 0, **({"client": client} if local else {}))
 
-    factory.assert_called_once_with("localhost", 9000)
+    if local:
+        factory.assert_not_called()
+    else:
+        factory.assert_called_once_with("localhost", 9000)
     assert client.infer.call_count == 2
     request = client.infer.call_args_list[0].args[0]
     np.testing.assert_array_equal(request.observation["observation/image"], img[::-1, ::-1])
@@ -140,7 +144,10 @@ def test_episode_preprocessing_and_action_chunks(libero, monkeypatch, tmp_path, 
     assert (result["episodes"], result["successes"], result["success_rate"]) == (1, 1, 1)
     assert video.call_args.args[0].name == "task0_ep0_test_task_success.mp4"
     env.close.assert_called_once_with()
-    client.close.assert_called_once_with()
+    if local:
+        client.close.assert_not_called()  # The evaluation owns the shared client.
+    else:
+        client.close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("stage", ["connect", "reset", "infer", "video", "short_chunk", "missing_rtc"])
@@ -256,3 +263,60 @@ def test_invalid_schedule_fails_before_environment_creation(libero, steps, delay
     with pytest.raises(ValueError, match="replan_steps must be positive"):
         libero.eval_one_task(libero.Args(replan_steps=steps, inference_delay=delay), suite, 5, 0)
     suite.get_task.assert_not_called()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_local_cli_reuses_and_closes_one_client(libero, monkeypatch, tmp_path, fail):
+    suite = SimpleNamespace(n_tasks=3)
+    libero.benchmark.get_benchmark_dict.return_value = {"libero_spatial": lambda: suite}
+    client = Mock()
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(libero, "LocalClientPolicy", factory)
+    executor = Mock(side_effect=AssertionError("local evaluation must be sequential"))
+    monkeypatch.setattr(libero, "ThreadPoolExecutor", executor)
+    seen = []
+
+    def evaluate(args, actual_suite, max_steps, task_id, *, client):
+        seen.append((task_id, client))
+        client.close.assert_not_called()
+        if fail:
+            raise RuntimeError("inference failed")
+        return {"episodes": 1, "successes": 1}
+
+    monkeypatch.setattr(libero, "eval_one_task", evaluate)
+
+    def run():
+        libero.tyro.cli(libero.eval_libero, args=[
+            "--client-args", '{"type": "local", "model_dir": "checkpoint", "device": "cpu"}',
+            "--args.video-out-path", str(tmp_path),
+        ])
+
+    if fail:
+        with pytest.raises(RuntimeError, match="inference failed"):
+            run()
+    else:
+        run()
+    factory.assert_called_once_with(model_dir="checkpoint", device="cpu")
+    assert seen == [(i, client) for i in range(1 if fail else 3)]
+    client.close.assert_called_once_with()
+    executor.assert_not_called()
+
+
+def test_local_rtc_rejected_before_loading(libero, monkeypatch):
+    factory = Mock()
+    monkeypatch.setattr(libero, "LocalClientPolicy", factory)
+    with pytest.raises(ValueError, match="disable RTC"):
+        libero.eval_libero(libero.Args(use_rtc=True), client_args='{"type": "local"}')
+    factory.assert_not_called()
+    libero.benchmark.get_benchmark_dict.assert_not_called()
+
+
+def test_websocket_client_options_forwarded(libero, monkeypatch, tmp_path):
+    suite = SimpleNamespace(n_tasks=1)
+    libero.benchmark.get_benchmark_dict.return_value = {"libero_spatial": lambda: suite}
+    evaluate = Mock(return_value={"episodes": 1, "successes": 1})
+    monkeypatch.setattr(libero, "eval_one_task", evaluate)
+    args = libero.Args(task_id=0, video_out_path=str(tmp_path))
+    libero.eval_libero(args, client_args='{"type":"websocket","host":"localhost","port":9000}')
+    evaluate.assert_called_once_with(
+        args, suite, 220, 0, client_options={"host": "localhost", "port": 9000})

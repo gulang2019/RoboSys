@@ -13,7 +13,7 @@ def __getattr__(name):
         from .openpi_cuda_graph import CudaGraphOpenPIPolicy
         return CudaGraphOpenPIPolicy
     if name == "FlashRTPolicy":
-        from .flash_rt import FlashRTPolicy
+        from .flash_rt_batched import FlashRTPolicy
         return FlashRTPolicy
     if name == "VLABasePolicy":
         from .vla_base import VLABasePolicy
@@ -21,10 +21,10 @@ def __getattr__(name):
     raise AttributeError(name)
 
 
-def create_policy(policy_config: PolicyConfig, device: str | None = None):
-    if policy_config.backend in ("flash_rt", "flashrt"):
-        from .flash_rt import FlashRTPolicy
-        return FlashRTPolicy(policy_config, device)
+def create_policy(policy_config: PolicyConfig, device: str | None = None, streams: dict[str, list] | None = None):
+    if policy_config.backend == "flash_rt":
+        from .flash_rt_batched import FlashRTPolicy
+        return FlashRTPolicy(policy_config, device, streams=streams)
     if policy_config.backend == "openpi":
         from .openpi import OpenPIPolicy
         return OpenPIPolicy(policy_config, device)

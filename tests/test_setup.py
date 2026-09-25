@@ -12,6 +12,9 @@ def test_setup_is_repeatable_and_preserves_incompatible_checkout(tmp_path):
     profile_script = tmp_path / 'scripts/profile/setup.sh'
     profile_script.parent.mkdir(parents=True)
     profile_script.write_text('echo profile-setup >> "${SETUP_TEST_ROOT}/profile-calls"\n')
+    libero_script = tmp_path / 'scripts/benchmark/setup-openpi-libero.sh'
+    libero_script.parent.mkdir(parents=True)
+    libero_script.write_text('echo openpi-libero-setup >> "${SETUP_TEST_ROOT}/libero-calls"\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     stub = bin_dir / 'stub'
@@ -55,6 +58,12 @@ elif name == 'python' and args == ['-']:
         assert result.returncode == 0, result.stdout + result.stderr
         assert 'Setup complete' in result.stdout
     assert (tmp_path / 'profile-calls').read_text().splitlines() == ['profile-setup'] * 2
+    assert (tmp_path / 'libero-calls').read_text().splitlines() == ['openpi-libero-setup'] * 2
+    result = subprocess.run(['bash', str(tmp_path/'setup.sh'), '--openpi-libero'],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / 'profile-calls').read_text().splitlines() == ['profile-setup'] * 2
+    assert (tmp_path / 'libero-calls').read_text().splitlines() == ['openpi-libero-setup'] * 3
     result = subprocess.run(['bash', str(tmp_path/'setup.sh')],
                             env=dict(env, TEST_LIBERO_REV='wrong-revision'),
                             capture_output=True, text=True, timeout=10)

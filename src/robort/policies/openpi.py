@@ -1,3 +1,7 @@
+import logging
+from pathlib import Path
+import tempfile
+
 import torch
 import numpy as np
 import jax
@@ -10,6 +14,88 @@ from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks, PI0Pytorch
 
 from .vla_base import VLABasePolicy
 from ..schemas import PolicyConfig, InferenceRequest, InferenceResponse
+
+logger = logging.getLogger(__name__)
+
+
+def _save_score_cdf(score_history: dict[int, np.ndarray], path: Path,
+                    xlabel: str = 'Visual embedding MSE') -> None:
+    """Save the empirical CDF without requiring a display or pyplot state."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    figure = Figure(figsize=(6, 4))
+    FigureCanvasAgg(figure)
+    ax = figure.subplots()
+    for step, scores in sorted(score_history.items()):
+        values = np.sort(scores.ravel())
+        probabilities = np.arange(1, values.size + 1) / values.size
+        ax.step(np.r_[values[0], values], np.r_[0, probabilities], where='post', label=f'Step {step}')
+    if score_history:
+        ax.legend(fontsize=6, ncol=max(1, (len(score_history) + 24) // 25),
+                  loc='upper left', bbox_to_anchor=(1, 1))
+    else:
+        ax.text(0.5, 0.5, 'No scored steps (initial full refresh only)', ha='center', transform=ax.transAxes)
+    ax.set(xlabel=xlabel, ylabel='CDF', ylim=(0, 1), title=xlabel)
+    ax.grid(alpha=0.3)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, bbox_inches='tight')
+
+
+def _text_attention_scores(attentions, indices, pad_mask, visual_tokens):
+    """Average valid text queries over layers and heads, retaining visual key order."""
+    queries = (indices >= visual_tokens) & pad_mask[0].index_select(0, indices).bool()
+    scores = torch.zeros(visual_tokens, device=indices.device, dtype=torch.float32)
+    if queries.any():
+        for attention in attentions:
+            scores += attention[0, :, queries, :visual_tokens].float().mean(dim=(0, 1))
+        scores /= len(attentions)
+    return scores * pad_mask[0, :visual_tokens]
+
+
+def _save_pruning_images(images, scores: torch.Tensor | None, iteration: int,
+                         indices: torch.Tensor | None = None, output: Path = Path('debug'),
+                         attention_scores: torch.Tensor | None = None) -> None:
+    """Shade 14x14 patches by score, using the same scale for both cameras."""
+    from PIL import Image
+
+    output.mkdir(parents=True, exist_ok=True)
+    selected = None if indices is None else indices.detach().cpu().numpy()
+    weights = None
+    if scores is not None:
+        values = scores.detach().float().cpu().numpy()
+        maximum = values.max()
+        weights = values / maximum if maximum > 0 else np.zeros_like(values)
+    attention_weights = None
+    if attention_scores is not None:
+        values = attention_scores.detach().float().cpu().numpy()
+        maximum = values.max()
+        attention_weights = values / maximum if maximum > 0 else np.zeros_like(values)
+    offset = 0
+    for name, image in zip(('global', 'wrist'), images):
+        pixels = image[0].detach().float().cpu()
+        if pixels.shape[0] == 3:
+            pixels = pixels.permute(1, 2, 0)
+        pixels = ((pixels + 1) * 127.5).round().clamp(0, 255).numpy().astype(np.uint8)
+        height, width = pixels.shape[:2]
+        rows, cols = height // 14, width // 14
+        count = rows * cols
+        brightness = np.ones(count) if weights is None else 0.25 + 0.75 * weights[offset:offset + count]
+        brightness = brightness.reshape(rows, cols).repeat(14, axis=0).repeat(14, axis=1)
+        shaded = (pixels * brightness[..., None]).round().clip(0, 255).astype(np.uint8)
+        keep = np.ones(count, dtype=bool) if selected is None else np.zeros(count, dtype=bool)
+        if selected is not None:
+            keep[selected[(selected >= offset) & (selected < offset + count)] - offset] = True
+        keep = keep.reshape(rows, cols).repeat(14, axis=0).repeat(14, axis=1)
+        Image.fromarray(pixels).save(output / f'{iteration}.{name}.png')
+        Image.fromarray(shaded).save(output / f'{iteration}.{name}.masked.png')
+        Image.fromarray(pixels * keep[..., None]).save(output / f'{iteration}.{name}.binary.png')
+        if attention_weights is not None:
+            brightness = 0.25 + 0.75 * attention_weights[offset:offset + count]
+            brightness = brightness.reshape(rows, cols).repeat(14, axis=0).repeat(14, axis=1)
+            attended = (pixels * brightness[..., None]).round().clip(0, 255).astype(np.uint8)
+            Image.fromarray(attended).save(output / f'{iteration}.{name}.attention.png')
+        offset += count
 
 def _recursive_stack(list_of_dicts: list[dict]) -> dict:
     """Recursively stack a list of dicts-of-arrays into a single dict-of-batched-arrays."""
@@ -67,13 +153,25 @@ class OpenPIPolicy(VLABasePolicy):
             raise TypeError("Decomposed inference requires a PyTorch checkpoint containing model.safetensors")
         self._model.eval()
         self._caches = {}  # Allocate once per batch size on first use.
+        self._debug_output = None
+        self._iter = 0
+        self.reset()
+        logger.info(f"initialize openpi policy with {policy_config}")
 
+    def _embed_seq_len(self):
+        return self._num_visual_tokens() + self.config.prompt_len
+
+    def _num_visual_tokens(self):
+        return {
+            '224': 256
+        }[self.config.image_resolution] * 3
 
     def preprocess(self, observations: list[InferenceRequest]) -> openpi.models.model.Observation:
         if not observations:
             raise ValueError("preprocess requires a nonempty batch")
         if any(request.inference_type != "sync" for request in observations):
             raise ValueError("Decomposed OpenPI inference only supports sync requests")
+
         inputs = []
         for request in observations:
             # Transforms can modify the dictionary structure.
@@ -109,7 +207,7 @@ class OpenPIPolicy(VLABasePolicy):
             )
         self._caches[batch_size].prefix_length = prefix_length
 
-        return {
+        embedding = {
             'state': state,
             'prefix_att_2d_masks_4d': prefix_att_2d_masks_4d,
             'prefix_embeds': prefix_embs,
@@ -117,33 +215,149 @@ class OpenPIPolicy(VLABasePolicy):
             'prefix_pad_masks': prefix_pad_masks,
             'past_key_values': self._caches[batch_size]
         }
+        if batch_size == 1 and self.config.encode_keep_rate is not None:
+            embedding['debug_images'] = images[:2]
+        return embedding
 
     @torch.no_grad()
     def encode(self, embedding: dict) -> dict:
         # The output borrows the supplied cache's storage.
         model = self._model.paligemma_with_expert.paligemma.language_model
         model.config._attn_implementation = "eager"
-        prefix = embedding['prefix_embeds']
+        prefix = embedding['prefix_embeds'] # [B, SeqLen, H]
         batch_size, prefix_length = prefix.shape[:2]
 
-        # Call the language model directly: the OpenPI wrapper does not expose
-        # cache_position. Always overwrite from zero; the cache adapter hides
-        # unused slots, so no reset or zero-fill is needed.
-        model.forward(
-            attention_mask=embedding['prefix_att_2d_masks_4d'],
-            position_ids=embedding['prefix_position_ids'],
+        attention_mask = embedding['prefix_att_2d_masks_4d']
+        position_ids = embedding['prefix_position_ids']
+        input_embeds = embedding['prefix_embeds']
+        indices = torch.arange(prefix_length, device=prefix.device)
+        if 'debug_images' in embedding and getattr(self, '_debug_output', None) is None:
+            Path('debug').mkdir(exist_ok=True)
+            self._debug_output = Path(tempfile.mkdtemp(prefix='run-', dir='debug'))
+            logger.info('Pruning debug output: %s', self._debug_output)
+        if batch_size == 1 and self.config.encode_keep_rate is not None:
+            selected = self.prune_encode_bsz1(prefix[0])
+            if selected is not None:
+                indices = selected
+                attention_mask = attention_mask.index_select(2, indices)
+                position_ids = position_ids.index_select(1, indices)
+                input_embeds = input_embeds.index_select(1, indices)
+
+        # Explicit cache positions preserve unselected KV slots during partial refresh.
+        debug_attention = batch_size == 1 and 'debug_images' in embedding
+        output = model.forward(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=embedding['past_key_values'],
-            cache_position=torch.arange(prefix_length, device=prefix.device),
-            inputs_embeds=embedding['prefix_embeds'],
+            cache_position=indices,
+            inputs_embeds=input_embeds,
+            output_attentions=debug_attention,
             use_cache=True,
             adarms_cond=None,
         )
+        if batch_size == 1 and self.config.encode_keep_rate is not None and self._prev_visual is None:
+            # Keep the first successfully encoded frame as the debugging baseline.
+            self._prev_visual = prefix[0, :self._num_visual_tokens()].detach().clone()
+        if batch_size == 1 and self.config.encode_keep_rate is not None and self._pruning_scores is not None:
+            self._score_history[self._iter] = self._pruning_scores.detach().float().cpu().numpy().copy()
+        if batch_size == 1 and self.config.encode_keep_rate is not None and 'debug_images' in embedding:
+            text_attn = _text_attention_scores(output.attentions, indices,
+                                               embedding['prefix_pad_masks'], self._num_visual_tokens())
+            self._attention_history[self._iter] = text_attn.detach().float().cpu().numpy().copy()
+            _save_pruning_images(embedding['debug_images'], self._pruning_scores, self._iter,
+                                 indices=indices, output=self._debug_output, attention_scores=text_attn)
 
         return {
             'state': embedding['state'],
             'prefix_pad_masks': embedding['prefix_pad_masks'],
             'past_key_values': embedding['past_key_values']
         }
+
+    @torch.no_grad()
+    def prune_encode_bsz1(self, prefix):
+        """Select visual tokens from a [sequence, hidden] prefix; keep all language tokens."""
+        if not 0 <= self.config.encode_keep_rate <= 1:
+            raise ValueError('encode_keep_rate must be between 0 and 1')
+        self._iter += 1
+        S, _ = prefix.shape
+        V = self._num_visual_tokens()
+        if S < V:
+            raise ValueError('Prefix is shorter than the configured visual token count')
+        visual = prefix[:V]
+        self._pruning_scores = None
+        if self._prev_visual is None:
+            return None
+        n_to_keep = round(self.config.encode_keep_rate * V)
+        scores = (visual.float() - self._prev_visual.float()).square().mean(dim=-1)
+        self._pruning_scores = scores
+        indices = scores.topk(k=n_to_keep).indices.sort().values
+        lang_indices = torch.arange(V,S,device = prefix.device, dtype = torch.long)
+        return torch.cat([indices, lang_indices])
+
+    def reset(self):
+        self._prev_visual = None
+        self._pruning_scores = None
+        # Keep filenames unique across episodes within a job.
+        self._iter = getattr(self, '_iter', 0)
+        self._score_history = getattr(self, '_score_history', {})
+        self._attention_history = getattr(self, '_attention_history', {})
+
+    def start_debug_episode(self, directory: str | Path) -> None:
+        """Finish previous artifacts and start an explicitly named episode directory."""
+        self.export_debug_videos()
+        output = Path(directory)
+        output.mkdir(parents=True, exist_ok=False)
+        self.reset()
+        self._debug_output = output
+        self._iter = 0
+        self._score_history = {}
+        self._attention_history = {}
+
+    def export_debug_videos(self, fps: int = 10) -> None:
+        """Encode the current job's camera PNGs, reading one frame at a time."""
+        import imageio.v2 as imageio
+        from PIL import Image, ImageDraw
+
+        output = getattr(self, '_debug_output', None)
+        if output is None:
+            return
+        frames = sorted(output.glob('*.global.png'), key=lambda path: int(path.name.split('.')[0]))
+        if frames:
+            destination = output / 'combined.tmp.mp4'
+            with imageio.get_writer(destination, fps=fps, codec='libx264', macro_block_size=1) as writer:
+                for frame in frames:
+                    iteration = frame.name.split('.')[0]
+                    rows = []
+                    for camera in ('global', 'wrist'):
+                        tiles = []
+                        for kind, suffix in (('full', ''), ('binary', '.binary'), ('shaded', '.masked'),
+                                             ('text attention', '.attention')):
+                            with Image.open(output / f'{iteration}.{camera}{suffix}.png') as image:
+                                tile = Image.new('RGB', (image.width, image.height + 24), 'black')
+                                tile.paste(image, (0, 24))
+                                ImageDraw.Draw(tile).text((6, 5), f'{camera} / {kind}', fill='white')
+                            tiles.append(np.asarray(tile))
+                        rows.append(np.concatenate(tiles, axis=1))
+                    writer.append_data(np.concatenate(rows, axis=0))
+            cdf = output / 'scores.cdf.tmp.png'
+            _save_score_cdf(getattr(self, '_score_history', {}), cdf)
+            attention_cdf = output / 'attention.cdf.tmp.png'
+            _save_score_cdf(getattr(self, '_attention_history', {}), attention_cdf,
+                            xlabel='Text-to-image attention probability')
+            destination.replace(output / 'combined.mp4')
+            cdf.replace(output / 'scores.cdf.png')
+            attention_cdf.replace(output / 'attention.cdf.png')
+            # Remove intermediates only after the video and both CDFs exist.
+            for artifact in output.iterdir():
+                parts = artifact.name.split('.')
+                is_frame = (parts[0].isdigit() and artifact.suffix == '.png'
+                            and (len(parts) == 2 or (parts[1] in ('global', 'wrist')
+                                 and (len(parts) == 3 or (len(parts) == 4 and parts[2] in ('masked', 'binary', 'attention'))))))
+                is_video = artifact.name in {f'{camera}.{kind}.mp4'
+                    for camera in ('global', 'wrist') for kind in ('full', 'binary', 'shaded')}
+                if is_frame or is_video:
+                    artifact.unlink()
+            logger.info('Saved combined.mp4, scores.cdf.png and attention.cdf.png in %s', output)
 
     @torch.no_grad()
     def decode(self, context: dict) -> dict[str, torch.Tensor]:

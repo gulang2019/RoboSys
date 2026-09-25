@@ -1,6 +1,6 @@
 import collections
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, nullcontext
 import dataclasses
 import logging
 import json
@@ -18,7 +18,7 @@ import tqdm
 import tyro
 
 from robort.schemas import InferenceRequest
-from robort.client import WebsocketClientPolicy
+from benchmark.client import LocalClientPolicy, WebsocketClientPolicy, parse_client_args
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -58,7 +58,7 @@ class Args:
 
 
 def eval_one_task(
-    args: Args, task_suite, max_steps: int, task_id: int
+    args: Args, task_suite, max_steps: int, task_id: int, client=None, client_options=None
 ):
     if args.replan_steps < 1 or args.inference_delay < 0:
         raise ValueError("replan_steps must be positive and inference_delay must be nonnegative")
@@ -71,7 +71,12 @@ def eval_one_task(
     # Initialize LIBERO environment and task description
     env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
 
-    with closing(env), closing(WebsocketClientPolicy(args.host, args.port)) as client:
+    with closing(env), (
+        nullcontext(client) if client is not None else closing(
+            WebsocketClientPolicy(**{"host": args.host, "port": args.port, **client_options})
+            if client_options else WebsocketClientPolicy(args.host, args.port)
+        )
+    ) as client:
         # Start episodes
         task_episodes, task_successes = 0, 0
 
@@ -80,6 +85,7 @@ def eval_one_task(
 
             # Reset environment
             env.reset()
+            client.reset()
             action_plan = collections.deque()
             pending_plans = collections.deque()
             previous_action = None
@@ -199,7 +205,15 @@ def eval_one_task(
         }
 
 
-def eval_libero(args: Args) -> None:
+def eval_libero(args: Args, client_args: str = "{}") -> None:
+    """Evaluate with --client-args '{"type": "local", "device": "cuda"}'."""
+    _eval_libero(args, client_args)
+
+
+def _eval_libero(args: Args, client_args: str, client=None) -> None:
+    client_type, client_options = parse_client_args(client_args)
+    if client_type == "local" and args.use_rtc:
+        raise ValueError("Local OpenPI client only supports sync requests; disable RTC")
     if args.inference_delay > ACTION_HORIZON or \
         args.replan_steps > ACTION_HORIZON or \
         args.inference_delay + args.replan_steps > ACTION_HORIZON:
@@ -207,6 +221,10 @@ def eval_libero(args: Args) -> None:
         exit(0)
     # Set random seed
     np.random.seed(args.seed)
+    if client_type == 'local':
+        import torch
+
+        torch.manual_seed(args.seed)
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -233,17 +251,30 @@ def eval_libero(args: Args) -> None:
     total_episodes, total_successes = 0, 0
     task_results = []
 
-    if args.task_id is not None:
-        task_results = [eval_one_task(args, task_suite, max_steps, args.task_id)]
+    borrowed_client = client is not None
+    if client_type == "local":
+        logging.info("Local OpenPI evaluation runs tasks sequentially with one shared model")
+        task_ids = [args.task_id] if args.task_id is not None else range(num_tasks_in_suite)
+        with (nullcontext(client) if client is not None else closing(LocalClientPolicy(**client_options))) as client:
+            task_results = [
+                eval_one_task(args, task_suite, max_steps, task_id, client=client)
+                for task_id in tqdm.tqdm(task_ids)
+            ]
+            if borrowed_client:
+                client.policy.export_debug_videos()
     else:
-        with ThreadPoolExecutor(max_workers=args.max_parallel_tasks) as executor:
-            task_results = list(tqdm.tqdm(
-                executor.map(
-                    lambda task_id: eval_one_task(args, task_suite, max_steps, task_id),
-                    range(num_tasks_in_suite),
-                ),
-                total=num_tasks_in_suite,
-            ))
+        kwargs = {"client_options": client_options} if client_options else {}
+        if args.task_id is not None:
+            task_results = [eval_one_task(args, task_suite, max_steps, args.task_id, **kwargs)]
+        else:
+            with ThreadPoolExecutor(max_workers=args.max_parallel_tasks) as executor:
+                task_results = list(tqdm.tqdm(
+                    executor.map(
+                        lambda task_id: eval_one_task(args, task_suite, max_steps, task_id, **kwargs),
+                        range(num_tasks_in_suite),
+                    ),
+                    total=num_tasks_in_suite,
+                ))
     total_episodes = sum(result['episodes'] for result in task_results)
     total_successes = sum(result['successes'] for result in task_results)
 
