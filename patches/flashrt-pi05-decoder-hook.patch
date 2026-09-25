@@ -1,0 +1,58 @@
+diff --git a/flash_rt/models/pi05/pipeline_rtx_batched.py b/flash_rt/models/pi05/pipeline_rtx_batched.py
+index dd5c8fa3..eca4729d 100644
+--- a/flash_rt/models/pi05/pipeline_rtx_batched.py
++++ b/flash_rt/models/pi05/pipeline_rtx_batched.py
+@@ -891,23 +891,7 @@ class Pi05BatchedPipeline(Pi05Pipeline):
+                     Bb["decoder_QKV_b2"].ptr.value,
+                     m, (DEC_NH + 2 * DEC_NKV) * DEC_HD, DEC_D, stream=stream)
+ 
+-        # C2: QKV split + RoPE — per-sample loop into batched KV cache
+-        per_sample_qkv_bytes = ds * (DEC_NH + 2 * DEC_NKV) * DEC_HD * 2
+-        per_sample_q_bytes = ds * DEC_NH * DEC_HD * 2
+-        sample_stride_kv = ap["enc_k_sample_stride_bytes"]
+-        for b in range(self.B):
+-            qkv_src = Bb["decoder_QKV_b2"].ptr.value + b * per_sample_qkv_bytes
+-            q_dst = ap["dec_Q"] + b * per_sample_q_bytes
+-            k_ptr_b, v_ptr_b = self._enc_kv_layer_ptrs_b2(i, offset_tokens=enc_seq)
+-            k_ptr_b += b * sample_stride_kv
+-            v_ptr_b += b * sample_stride_kv
+-            fvk.qkv_split_rope(
+-                qkv_src,
+-                Bb["decoder_rope_weights"].ptr.value,
+-                q_dst,
+-                k_ptr_b, v_ptr_b,
+-                ds, DEC_NH * DEC_HD, DEC_NKV * DEC_HD, DEC_NKV * DEC_HD,
+-                DEC_HD, stream=stream)
++        self._decoder_qkv_rope_batched(i, enc_seq, ds, stream)
+ 
+         # C3: Batched cross-attention (per-sample contexts)
+         dec_o_ptr = self.attn.run_batched(
+@@ -1015,6 +999,28 @@ class Pi05BatchedPipeline(Pi05Pipeline):
+                 Bb["decoder_x_b2"].ptr.value, Bb["x_normed_buf_b2"].ptr.value,
+                 Bb["gate_buf_b2"].ptr.value, m * DEC_D, stream=stream)
+ 
++    def _decoder_qkv_rope_batched(self, i: int, enc_seq: int,
++                                  ds: int, stream: int) -> None:
++        """Split decoder QKV; override to support per-sample prefix positions."""
++        Bb, ap, fvk = self.bufs, self._attn_ptrs_b2, self.fvk
++        # C2: QKV split + RoPE — per-sample loop into batched KV cache
++        per_sample_qkv_bytes = ds * (DEC_NH + 2 * DEC_NKV) * DEC_HD * 2
++        per_sample_q_bytes = ds * DEC_NH * DEC_HD * 2
++        sample_stride_kv = ap["enc_k_sample_stride_bytes"]
++        for b in range(self.B):
++            qkv_src = Bb["decoder_QKV_b2"].ptr.value + b * per_sample_qkv_bytes
++            q_dst = ap["dec_Q"] + b * per_sample_q_bytes
++            k_ptr_b, v_ptr_b = self._enc_kv_layer_ptrs_b2(i, offset_tokens=enc_seq)
++            k_ptr_b += b * sample_stride_kv
++            v_ptr_b += b * sample_stride_kv
++            fvk.qkv_split_rope(
++                qkv_src,
++                Bb["decoder_rope_weights"].ptr.value,
++                q_dst,
++                k_ptr_b, v_ptr_b,
++                ds, DEC_NH * DEC_HD, DEC_NKV * DEC_HD, DEC_NKV * DEC_HD,
++                DEC_HD, stream=stream)
++
+     # ══════════════════════════════════════════════════════════════════
+     #   Top-level: full pipeline + calibration + graph capture
+     # ══════════════════════════════════════════════════════════════════

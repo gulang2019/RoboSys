@@ -81,6 +81,7 @@ FLASHRT="$ROOT/3rdparty/FlashRT"
 if [[ ! -f "$FLASHRT/pyproject.toml" ]]; then
     git submodule update --init -- 3rdparty/FlashRT
 fi
+bash "$ROOT/scripts/profile/apply-flashrt-patch.sh" "$FLASHRT"
 PROFILE_ENV="$ROOT/.venv-profile"
 [[ -x "$PROFILE_ENV/bin/python" ]] || uv venv "$PROFILE_ENV" --python 3.11
 "$PROFILE_ENV/bin/python" -c 'import sys; assert sys.version_info[:2] == (3, 11), "Expected Python 3.11"'

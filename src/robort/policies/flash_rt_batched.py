@@ -439,6 +439,9 @@ class FlashRTPolicy(VLABasePolicy):
             raise ValueError("LIBERO preprocessing requires two 224x224 views")
         if policy_config.chunk_size < 1 or policy_config.num_steps < 1:
             raise ValueError("chunk_size and num_steps must be positive")
+        if not hasattr(Pi05BatchedPipeline, "_decoder_qkv_rope_batched"):
+            raise RuntimeError("FlashRT needs the RoboSys decoder hook. Run "
+                               "bash scripts/profile/apply-flashrt-patch.sh before loading the policy.")
         _validate_cuda_runtime()
         with torch.cuda.device(self.device), torch.inference_mode():
             capability = torch.cuda.get_device_capability()

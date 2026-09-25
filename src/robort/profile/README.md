@@ -57,6 +57,25 @@ not manage dependency events.
 
 ## Command line and tests
 
+FlashRT is pinned to the upstream commit `eaf90192`; the decoder override hook
+is shipped in `patches/flashrt-pi05-decoder-hook.patch`. The setup script applies
+it idempotently. For an existing environment, apply it without reinstalling:
+
+```sh
+git submodule update --init -- 3rdparty/FlashRT
+bash scripts/profile/apply-flashrt-patch.sh
+```
+
+If pulling the earlier `5c03d88` revision reports `not our ref 1400361a...`, first
+fetch the RoboSys fix without recursive submodule fetching:
+
+```sh
+git -c submodule.recurse=false pull --no-recurse-submodules
+```
+
+Then run the submodule update and patch commands above. Local edits in the
+submodule are preserved; resolve any checkout/patch conflicts before proceeding.
+
 Set `LD_LIBRARY_PATH` before launching Python. Activating `.venv-profile` alone
 is insufficient: FlashRT loads the unversioned `libcudart.so` independently of
 PyTorch. On this machine, omitting the path selects CUDA 11.7 and can crash graph

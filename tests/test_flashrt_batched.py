@@ -477,3 +477,9 @@ def test_cuda_runtime_validation(monkeypatch, runtime, accepted):
     else:
         with pytest.raises(RuntimeError, match="LD_LIBRARY_PATH"):
             backend._validate_cuda_runtime()
+
+
+def test_missing_decoder_hook_fails_before_loading_weights(monkeypatch):
+    monkeypatch.delattr(backend.Pi05BatchedPipeline, '_decoder_qkv_rope_batched')
+    with pytest.raises(RuntimeError, match='apply-flashrt-patch.sh'):
+        backend.FlashRTPolicy(PolicyConfig(precision='bf16'), 'cuda:0')
