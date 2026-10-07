@@ -4,6 +4,9 @@ torch==2.7.0+cu128
 cuda-python==12.9.7
 nvidia-ml-py==13.610.43
 numpy>=1.24
+pandas
+matplotlib
+tqdm
 ml-dtypes>=0.5.1
 transformers<4.56
 pillow

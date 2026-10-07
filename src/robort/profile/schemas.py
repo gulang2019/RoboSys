@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 import math
 
-from ..policies import PolicyConfig
+from ..schemas import PolicyConfig
 
 
 # TODO: the profile should be maintained in a tree structure.

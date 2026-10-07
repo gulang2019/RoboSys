@@ -11,6 +11,7 @@ import weakref
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from flash_rt import flash_rt_fa2, flash_rt_kernels
 from flash_rt.core.cuda_buffer import _cudart
@@ -25,7 +26,7 @@ from flash_rt.models.pi05.pipeline_rtx import (
 from flash_rt.models.pi05.pipeline_rtx_batched import Pi05BatchedPipeline
 from flash_rt.utils.paligemma_tokenizer import load_paligemma_sentencepiece
 
-from .config import PolicyConfig
+from ..schemas import PolicyConfig
 from .vla_base import VLABasePolicy
 from ..schemas import InferenceRequest, InferenceResponse
 
@@ -384,32 +385,35 @@ class FlashRTFrontEnd(Pi05TorchFrontendRtx):
                    stream.device != self.embedding_weight.device for stream in stage_streams):
                 raise ValueError("stream must belong to the model device")
 
-    def compile(self, streams: dict[str, list]):
-        """Capture missing stream variants; caller must drain all stages first."""
+    def compile(self, streams: dict[str, list], batch_size=None):
+        """Capture missing variants, optionally for one batch; drain all stages first."""
         self.validate_streams(streams)
         if any(stream.cuda_stream == 0 for group in streams.values() for stream in group):
             raise ValueError("graph capture requires non-default streams")
-        for stage, variants in self.pipelines.items():
-            for pipeline in variants.values():
-                if pipeline._graphs is None:
-                    pipeline._graphs = {}
-                for stream in streams[stage]:
-                    if stream.cuda_stream in pipeline._graphs:
-                        continue
-                    handle = ctypes.c_void_p(stream.cuda_stream)
-                    with torch.cuda.device(stream.device), torch.inference_mode(), torch.cuda.stream(stream):
-                        pipeline.autotune_gemms()
-                        for _ in range(3):
-                            pipeline.run(stream.cuda_stream)
-                        stream.synchronize()
-                        graph = CUDAGraph()
-                        graph.begin_capture(handle)
-                        pipeline.run(stream.cuda_stream)
-                        graph.end_capture(handle)
-                        graph._release = weakref.finalize(
-                            graph, _destroy_graph, graph._graph_exec, graph._graph, stream.device)
-                        stream.synchronize()
-                        pipeline._graphs[stream.cuda_stream] = graph
+        jobs = [(stage, pipeline, stream)
+                for stage, variants in self.pipelines.items()
+                for pipeline in variants.values()
+                if batch_size is None or pipeline.B == batch_size
+                for stream in streams[stage]]
+        for stage, pipeline, stream in tqdm(jobs, desc="Autotune + compile", unit="graph", leave=False):
+            if pipeline._graphs is None:
+                pipeline._graphs = {}
+            if stream.cuda_stream in pipeline._graphs:
+                continue
+            handle = ctypes.c_void_p(stream.cuda_stream)
+            with torch.cuda.device(stream.device), torch.inference_mode(), torch.cuda.stream(stream):
+                pipeline.autotune_gemms()
+                for _ in range(3):
+                    pipeline.run(stream.cuda_stream)
+                stream.synchronize()
+                graph = CUDAGraph()
+                graph.begin_capture(handle)
+                pipeline.run(stream.cuda_stream)
+                graph.end_capture(handle)
+                graph._release = weakref.finalize(
+                    graph, _destroy_graph, graph._graph_exec, graph._graph, stream.device)
+                stream.synchronize()
+                pipeline._graphs[stream.cuda_stream] = graph
 
     def close(self):
         """Release graph handles after the controller has drained all stages."""
@@ -509,6 +513,15 @@ class FlashRTPolicy(VLABasePolicy):
             else:
                 pipeline._graphs[stream.cuda_stream].replay(ctypes.c_void_p(stream.cuda_stream))
             return pipeline.get_output()
+
+    @torch.inference_mode()
+    def _get_graph(self, stage, batch_size, stream):
+        pipeline = self.policy.get_pipeline(stage, batch_size)
+        if pipeline._graphs is None:
+            raise ValueError(f"uncaptured graph for {batch_size=}, {stage=}")
+        if stream not in self.streams[stage] or stream.cuda_stream not in pipeline._graphs:
+            raise ValueError(f"unregistered stream for {stage}")
+        return pipeline._graphs[stream.cuda_stream]
 
     def embed(self, observations, stream):
         return self._execute("embed", observations, stream)

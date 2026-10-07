@@ -1,7 +1,7 @@
 import torch
 
 
-from .config import PolicyConfig
+from ..schemas import PolicyConfig
 from ..schemas import (InferenceRequest,
                             InferenceResponse)
 
