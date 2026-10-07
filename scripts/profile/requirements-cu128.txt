@@ -8,17 +8,23 @@ charset-normalizer==3.5.1
     # via requests
 cmake==4.4.3
     # via -r scripts/profile/requirements.in
+contourpy==1.3.3
+    # via matplotlib
 cuda-bindings==12.9.7
     # via cuda-python
 cuda-pathfinder==1.8.1
     # via cuda-bindings
 cuda-python==12.9.7
     # via -r scripts/profile/requirements.in
+cycler==0.12.1
+    # via matplotlib
 filelock==3.32.6
     # via
     #   huggingface-hub
     #   torch
     #   transformers
+fonttools==4.66.1
+    # via matplotlib
 fsspec==2026.7.0
     # via
     #   huggingface-hub
@@ -35,8 +41,12 @@ iniconfig==2.3.0
     # via pytest
 jinja2==3.1.6
     # via torch
+kiwisolver==1.5.1
+    # via matplotlib
 markupsafe==3.0.3
     # via jinja2
+matplotlib==3.11.2
+    # via -r scripts/profile/requirements.in
 ml-dtypes==0.6.0
     # via -r scripts/profile/requirements.in
 mpmath==1.3.0
@@ -48,8 +58,11 @@ ninja==1.13.2
 numpy==2.4.6
     # via
     #   -r scripts/profile/requirements.in
+    #   contourpy
     #   flash-rt
+    #   matplotlib
     #   ml-dtypes
+    #   pandas
     #   transformers
 nvidia-cublas-cu12==12.8.3.14
     # via
@@ -93,19 +106,30 @@ nvidia-nvtx-cu12==12.8.55
 packaging==26.3
     # via
     #   huggingface-hub
+    #   matplotlib
     #   pytest
     #   transformers
     #   wheel
-pillow==12.3.0
+pandas==3.0.6
     # via -r scripts/profile/requirements.in
+pillow==12.3.0
+    # via
+    #   -r scripts/profile/requirements.in
+    #   matplotlib
 pluggy==1.6.0
     # via pytest
 pybind11==3.1.0
     # via -r scripts/profile/requirements.in
 pygments==2.21.0
     # via pytest
+pyparsing==3.3.3
+    # via matplotlib
 pytest==9.1.1
     # via -r scripts/profile/requirements.in
+python-dateutil==2.9.0.post0
+    # via
+    #   matplotlib
+    #   pandas
 pyyaml==6.0.3
     # via
     #   flash-rt
@@ -127,6 +151,8 @@ setuptools==84.0.0
     # via
     #   -r scripts/profile/requirements.in
     #   triton
+six==1.17.0
+    # via python-dateutil
 sympy==1.14.0
     # via torch
 tokenizers==0.21.4
@@ -137,6 +163,7 @@ torch==2.7.0+cu128
     #   flash-rt
 tqdm==4.70.1
     # via
+    #   -r scripts/profile/requirements.in
     #   huggingface-hub
     #   transformers
 transformers==4.55.4

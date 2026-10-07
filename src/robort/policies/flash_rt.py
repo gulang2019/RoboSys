@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from .config import PolicyConfig
+from ..schemas import PolicyConfig
 from .vla_base import VLABasePolicy
 from ..schemas import InferenceResponse
 

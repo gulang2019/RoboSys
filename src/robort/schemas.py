@@ -1,7 +1,28 @@
 import numpy as np
 from dataclasses import dataclass, field, asdict
 
-from .policies import PolicyConfig
+STAGES = ('preprocess', 'embed', 'encode', 'decode', 'postprocess')
+
+@dataclass
+class PolicyConfig:
+    model_name: str = "pi05_libero"
+    backend: str = "openpi"
+    num_views: int = 2
+    image_resolution: str = "224"
+    precision: str = "fp16"
+    prompt_len: int = 20
+    model_dir: str | None = None
+    num_steps: int = 10
+    chunk_size: int = 10
+    use_cuda_graph: bool = True
+    batch_sizes: dict[str, list[int]] | None = None
+    sm_partitions: dict[str, float] | None = None
+    # Compatibility with the existing OpenPI inference configuration.
+    num_sample_steps: int | None = None
+    use_torch_compile: bool = True
+    # Sparsity config
+    encode_keep_rate: float | None = None
+
 
 @dataclass
 class InferenceRequest:
@@ -21,15 +42,7 @@ class InferenceResponse:
     # Model-space actions used for RTC conditioning, before output transforms.
     rtc_prev_actions: np.ndarray | None = None
 
-# @dataclass
-# class PolicyConfig:
-#     model_name: str = "pi05_libero"
-#     model_dir: str = "checkpoints/pi05_libero"
-#     env_name: str = "libero_20"
-#     max_batch_size: int = 10
-#     batch_sizes: list[int] = field(default_factory=list)
-#     num_sample_steps: int = 10
-#     action_horizon: int = 10
+
 
 @dataclass
 class ServerConfig:

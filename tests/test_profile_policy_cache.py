@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 torch = pytest.importorskip('torch')
-from robort.policies.config import PolicyConfig
+from robort.schemas import PolicyConfig
 from robort.profile.policy_cache import PolicyCache
 from robort.profile.runner import Runner
 from robort.profile.schemas import RunnerConfig

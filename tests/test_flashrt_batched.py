@@ -16,7 +16,7 @@ torch = pytest.importorskip("torch")
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 backend = pytest.importorskip("robort.policies.flash_rt_batched")
-from robort.policies.config import PolicyConfig
+from robort.schemas import PolicyConfig
 from robort.schemas import InferenceRequest
 
 CKPT = Path(os.environ.get("ROBORT_FLASHRT_CHECKPOINT", "checkpoints/pi05_libero_pytorch"))
@@ -159,6 +159,8 @@ def test_initialization_registry_weights_runners_and_graphs(policy):
         for stream in policy.streams[stage]:
             ga, gb = a._graphs[stream.cuda_stream], b._graphs[stream.cuda_stream]
             assert ga is not gb and ga.captured and gb.captured
+            assert policy._get_graph(stage, 1, stream) is ga
+            assert policy._get_graph(stage, 2, stream) is gb
         assert all(a.bufs[k].ptr.value == b.bufs[k].ptr.value for k in a.bufs)
         assert frontend.get_pipeline(stage, 1) is a
         with pytest.raises(ValueError, match="pipeline capacity"):

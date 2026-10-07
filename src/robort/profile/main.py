@@ -10,7 +10,7 @@ from robort.profile.runner import Runner
 from robort.profile.schemas import (
     RunnerConfig,
     HardwareConfig)
-from robort.policies import PolicyConfig
+from robort.schemas import PolicyConfig
 
 import logging
 

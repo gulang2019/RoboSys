@@ -129,6 +129,22 @@ conversion along with the OpenPI environment.
 If `3rdparty/openpi` is missing, setup clones revision
 `215abfb217dbac7d5f1273282331b9b1866c0479`. An existing checkout must match this revision; incompatible checkouts are left untouched.
 
+## Multi-stream profiling
+
+After activating the profiling environment, run the SM-partition sweep and plot
+its latency/throughput Pareto frontier on GPU 0:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -u -c \
+  'from robort.profile.profile_multi_stream import profile, draw; profile(); draw()'
+```
+
+The default batch sizes are 1, 2, 4, 6 and 8. Concurrent stages use disjoint green
+streams and CUDA graphs. Progress bars cover compilation and all 180 profiling
+configurations. Results are saved as `profile/multi_stream_tradeoffs.csv` and
+`profile/multi_stream_tradeoffs.png`. To redraw an existing CSV, run
+`python -m robort.profile.profile_multi_stream`.
+
 ## Updating dependencies
 
 OpenPI uses its upstream frozen `uv.lock` plus the pinned profiling packages in

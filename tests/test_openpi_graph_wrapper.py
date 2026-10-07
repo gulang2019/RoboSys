@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip('torch')
 pytest.importorskip('openpi')
-from robort.policies.config import PolicyConfig
+from robort.schemas import PolicyConfig
 from robort.policies import openpi_cuda_graph as module
 
 
