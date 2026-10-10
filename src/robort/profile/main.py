@@ -24,7 +24,7 @@ DEFAULT_BATCH_SIZES = {
 
 HW_CHOICES = [
     ('power_perc', [1.0]),
-    ('sm_perc', [1.0])
+    ('sm_perc', [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.1875, 0.125, 0.0625])
 ]
 
 POLICY_CHOICES = [
@@ -112,7 +112,7 @@ def main(runner_config: RunnerConfig,
             row = asdict(profile)
             config = row.pop('hardware_config')
             store_profiles(output_dir / 'hardware_profile.csv', [{**config, **row}], hardware_keys)
-
+        exit(0)
         for policy_config in policy_configs: 
             runner.init_backend(policy_config, hw_configs)
             for hw_config in hw_configs:

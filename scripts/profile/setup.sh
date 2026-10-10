@@ -170,6 +170,7 @@ if [[ "${BUILD_FLASHRT:-1}" != 0 ]]; then
         -DPython3_EXECUTABLE="$PROFILE_ENV/bin/python" -DGPU_ARCH="${GPU_ARCH:-89}"
     "$PROFILE_ENV/bin/cmake" --build "$FLASHRT/build-profile" --parallel "${BUILD_JOBS:-4}"
     "$PROFILE_ENV/bin/python" -c 'from flash_rt.frontends.torch.pi05_rtx_fp16 import Pi05TorchFrontendRtxFP16; from flash_rt.frontends.torch.pi05_rtx import Pi05TorchFrontendRtx'
+    "$PROFILE_ENV/bin/python" -c 'from flash_rt import flash_rt_kernels; assert "stream:" in flash_rt_kernels.GemmRunner.autotune_bf16_nn.__doc__, "FlashRT must be rebuilt with the stream-autotune patch"'
 fi
 "$PROFILE_ENV/bin/python" - "${BUILD_FLASHRT:-1}" "${SKIP_GPU_CHECK:-0}" <<'PY'
 import sys

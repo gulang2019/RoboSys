@@ -57,13 +57,21 @@ not manage dependency events.
 
 ## Command line and tests
 
-FlashRT is pinned to the upstream commit `eaf90192`; the decoder override hook
-is shipped in `patches/flashrt-pi05-decoder-hook.patch`. The setup script applies
-it idempotently. For an existing environment, apply it without reinstalling:
+FlashRT is pinned to the upstream commit `eaf90192`. RoboSys ships the decoder
+override hook in `patches/flashrt-pi05-decoder-hook.patch` and stream-aware BF16
+GEMM autotuning in `patches/flashrt-stream-autotune.patch`. Setup applies both
+idempotently before building. Tuning and its timing events run on the supplied
+CUDA stream, including green streams with partial SM allocations. Split-KV
+decode is enabled in RoboSys's Python backend and needs no additional native patch.
+
+For an existing environment, apply the patches and rebuild the native extension:
 
 ```sh
 git submodule update --init -- 3rdparty/FlashRT
 bash scripts/profile/apply-flashrt-patch.sh
+LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64 \
+  .venv-profile/bin/cmake --build 3rdparty/FlashRT/build-profile \
+  --target flash_rt_kernels --parallel 4
 ```
 
 If pulling the earlier `5c03d88` revision reports `not our ref 1400361a...`, first

@@ -78,6 +78,7 @@ def _green_stream(torch, device, requested_sms):
                                driver.CUstream_flags.CU_STREAM_NON_BLOCKING, 0)
         cleanup.callback(_cuda_call, driver.cuStreamDestroy, raw_stream)
         stream = torch.cuda.ExternalStream(int(raw_stream), device=device)
+        stream.num_sms = actual_sms
         cleanup.callback(stream.synchronize)
         _LOG.info("Green context on CUDA %s: requested %s SMs, allocated %s",
                   device, requested_sms, actual_sms)

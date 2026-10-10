@@ -142,6 +142,22 @@ class EncodeAttnBackend(_StageAttention):
 class DecodeAttnBackend(_StageAttention):
     stage = "decode"
 
+    def __init__(self, batch_size, shared_buffers, *args, **kwargs):
+        super().__init__(batch_size, shared_buffers, *args, **kwargs)
+        b, q, h, d = self.t["q"].shape
+        splits = min(128, (self.t["k"].shape[2] + 63) // 64)
+        self._lse_accum = torch.empty(splits, b, h, q, device=self.t["q"].device, dtype=torch.float32)
+        self._o_accum = torch.empty(splits, b, h, q, d, device=self.t["q"].device, dtype=torch.float32)
+
+    def run(self, stream: int, layer_idx=0):
+        t = self.t
+        # The helper's scratch reset must use the same stream as the attention launch.
+        with torch.cuda.stream(torch.cuda.ExternalStream(stream, device=t["q"].device)):
+            self._call_fvk_fa2_seqused_splitkv(
+                t["q"], t["k"][layer_idx], t["v"][layer_idx], t["o"], t["lse"], t["lengths"],
+                lse_accum=self._lse_accum, o_accum=self._o_accum, stream=stream)
+        return t["o"].data_ptr()
+
 
 class _StagePipeline(Pi05BatchedPipeline):
     def __init__(self, batch_size, shared_buffers, *, attn_backend, gemm, fvk, weights, model_spec):
@@ -175,14 +191,14 @@ class _StagePipeline(Pi05BatchedPipeline):
         dst.copy_(src)
 
     def autotune_gemms(self):
-        """Tune the exact BF16 GEMMs used by this stage, once per runner/shape."""
+        """Tune each BF16 shape on the current stream before graph capture."""
         runner = self.gemm
-        seen = self.storage.tuned_shapes
+        seen = set()
         class Tuner:
             def bf16_nn(_, a, w, out, m, n, k, stream=0):
                 if (m, n, k) not in seen:
                     _check(_cudart.cudaStreamSynchronize(ctypes.c_void_p(stream)))
-                    runner.autotune_bf16_nn(a, w, out, m, n, k)
+                    runner.autotune_bf16_nn(a, w, out, m, n, k, stream=stream)
                     seen.add((m, n, k))
                 runner.bf16_nn(a, w, out, m, n, k, stream=stream)
         try:
@@ -402,6 +418,8 @@ class FlashRTFrontEnd(Pi05TorchFrontendRtx):
                 continue
             handle = ctypes.c_void_p(stream.cuda_stream)
             with torch.cuda.device(stream.device), torch.inference_mode(), torch.cuda.stream(stream):
+                pipeline.attn._num_sms = getattr(
+                    stream, "num_sms", torch.cuda.get_device_properties(stream.device).multi_processor_count)
                 pipeline.autotune_gemms()
                 for _ in range(3):
                     pipeline.run(stream.cuda_stream)
@@ -509,6 +527,8 @@ class FlashRTPolicy(VLABasePolicy):
                          for item in items]
             pipeline.set_input(items)
             if pipeline._graphs is None:
+                pipeline.attn._num_sms = getattr(
+                    stream, "num_sms", torch.cuda.get_device_properties(stream.device).multi_processor_count)
                 pipeline.run(stream.cuda_stream)
             else:
                 pipeline._graphs[stream.cuda_stream].replay(ctypes.c_void_p(stream.cuda_stream))
