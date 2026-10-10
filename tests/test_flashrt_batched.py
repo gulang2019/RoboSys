@@ -145,6 +145,42 @@ def test_allocate_bind_capacity_and_minimal_buffers(attn_cls, pipeline_cls, stag
         pipeline_cls.allocate_buffers(0, spec)
 
 
+@pytest.mark.parametrize("batch_size", [1, 3])
+@pytest.mark.parametrize("sms", [32, 128])
+def test_decoder_splitkv_graph_with_changing_lengths(batch_size, sms):
+    from robort.profile.environment import _green_stream
+
+    buffers = backend.DecodeAttnBackend.allocate_buffers(3)
+    attn = backend.DecodeAttnBackend(batch_size, buffers)
+    attn._num_sms = sms
+    t = attn.t
+    with _green_stream(torch, torch.cuda.current_device(), sms) as stream, torch.inference_mode():
+        with torch.cuda.stream(stream):
+            for key in ("q", "k", "v"):
+                t[key].normal_(0, 0.3)
+            attn.run(stream.cuda_stream)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            attn.run(stream.cuda_stream)
+        for length in (t["k"].shape[2], 658, 64, 1):
+            with torch.cuda.stream(stream):
+                t["lengths"].copy_(torch.tensor(
+                    [max(1, length - 8 * b) for b in range(batch_size)],
+                    device=stream.device, dtype=torch.int32))
+                attn._call_fvk_fa2_seqused(
+                    t["q"], t["k"][0], t["v"][0], t["o"], t["lse"], t["lengths"],
+                    stream=stream.cuda_stream)
+                reference = t["o"].clone()
+                attn.run(stream.cuda_stream)
+                eager = t["o"].clone()
+                graph.replay()
+            stream.synchronize()
+            torch.testing.assert_close(t["o"], reference, rtol=0.02, atol=0.002)
+            torch.testing.assert_close(t["o"], eager, rtol=0, atol=0)
+        graph.reset()
+
+
 def test_initialization_registry_weights_runners_and_graphs(policy):
     frontend = policy.policy
     variants = frontend.pipelines
