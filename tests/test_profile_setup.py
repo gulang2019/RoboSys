@@ -15,6 +15,12 @@ def test_profile_setup_defaults_and_pinned_checkout(tmp_path, skip_checkpoint):
     script.parent.mkdir(parents=True)
     script.write_text(source.read_text().replace(
         'export PATH="$HOME/.local/bin:$PATH"', ': # retain command stubs'))
+    helper = source.parent / 'apply-flashrt-patch.sh'
+    (script.parent / helper.name).write_text(helper.read_text())
+    patches = tmp_path / 'patches'
+    patches.mkdir()
+    for patch in (source.parents[2] / 'patches').glob('flashrt-*.patch'):
+        (patches / patch.name).write_text(patch.read_text())
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     stub = bin_dir / 'stub'

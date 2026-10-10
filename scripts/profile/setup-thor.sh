@@ -117,6 +117,7 @@ FLASHRT="$ROOT/3rdparty/FlashRT"
 if [[ ! -f "$FLASHRT/pyproject.toml" ]]; then
     git submodule update --init -- 3rdparty/FlashRT
 fi
+bash "$ROOT/scripts/profile/apply-flashrt-patch.sh" "$FLASHRT"
 uv pip install --python "$PYTHON" --no-deps -e "$FLASHRT"
 if [[ ! -e "$FLASHRT/third_party/cutlass" ]]; then
     git clone --depth 1 --branch v4.4.2 https://github.com/NVIDIA/cutlass.git \
