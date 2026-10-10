@@ -25,3 +25,9 @@
 [submodule "3rdparty/armory"]
 	path = 3rdparty/armory
 	url = https://github.com/GaTech-RL2/armory.git
+[submodule "3rdparty/sglang"]
+	path = 3rdparty/sglang
+	url = https://github.com/sgl-project/sglang.git
+[submodule "3rdparty/expo-ft"]
+	path = 3rdparty/expo-ft
+	url = https://github.com/pd-perry/expo-ft.git

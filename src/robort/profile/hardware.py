@@ -51,7 +51,7 @@ def profile_hardware(hardware_config: HardwareConfig) -> HardwareProfile:
         target = torch.empty_like(source)
         host = torch.empty(size, dtype=torch.uint8, pin_memory=True)
         host.zero_()
-        mem_bw = 2 * size / benchmark(lambda: target.copy_(source)) / 1e9
+        mem_bw = 2 * size / benchmark(lambda: torch.add(source, 1, out=target)) / 1e9
         c2g_bw = size / benchmark(lambda: target.copy_(host, non_blocking=True)) / 1e9
         g2c_bw = size / benchmark(lambda: host.copy_(source, non_blocking=True)) / 1e9
 
