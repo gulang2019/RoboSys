@@ -239,9 +239,10 @@ def profile_single_stage(batch_size, sms=None, *, repeat=5, warmup=3):
                 label = f'batch={batch_size} {stage}={stream.num_sms} SMs'
                 timings = _nsys_profile(graphs, {stage: stream}, repeat=repeat, warmup=warmup, label=label)
                 data.append((stage, device_name, batch_size, stream.num_sms / total_sms, timings[stage]))
+    csv_path = f'profile/profile_per_stage_b{batch_size}.csv'
     pd.DataFrame(data, columns=['stage', 'device', 'batch_size', 'sm_perc', 'time_s']).to_csv(
-        'profile/profile_per_stage.csv', index=False)
-    print('saved to profile/profile_per_stage.csv')
+        csv_path, index=False)
+    print(f'saved to {csv_path}')
     
 def profile(batch_sizes=[1,2,4,6,8]):
     batch_sizes = list(batch_sizes)
@@ -356,5 +357,5 @@ def draw():
 if __name__ == '__main__':
     # profile()
     # draw()
-    profile_single_stage(2, [8, 16, 24, 32, 48, 64, 80, 96, 112, 128])
+    profile_single_stage(1, [8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 170])
     

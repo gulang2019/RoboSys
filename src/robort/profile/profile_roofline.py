@@ -11,7 +11,8 @@ class Hardware:
 
     def __init__(self, device_name, dtype = 'bf16'):
         csvs = {
-            'NVIDIA GeForce RTX 4090': 'profile/rtx4090/hardware_profile.csv'
+            'NVIDIA GeForce RTX 4090': 'profile/rtx4090/hardware_profile.csv',
+            'NVIDIA GeForce RTX 5090': 'profile/rtx5090/hardware_profile.csv'
         }
         df = pd.read_csv(csvs.get(device_name, None))
         
@@ -70,7 +71,7 @@ def roofline_by_stage(batch_size, sm_percs):
     print(device_name)
     perf_model = PerfModel(device_name)
     hardware = Hardware(device_name)
-    measured = pd.read_csv('profile/profile_per_stage.csv')
+    measured = pd.read_csv(f'profile/profile_per_stage_b{batch_size}.csv')
     fig, axes = plt.subplots(1, len(stages), figsize = (len(stages) * 5, 5))
     for i, s in enumerate(stages):
         ax = axes[i] 
@@ -154,4 +155,4 @@ def roofline(batch_sizes):
 
 if __name__ == '__main__':
     # roofline(list(range(1,9)))
-    roofline_by_stage(batch_size = 2, sm_percs = [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.1875, 0.125, 0.0625])
+    roofline_by_stage(batch_size = 1, sm_percs = [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.1875, 0.125, 0.0625])
