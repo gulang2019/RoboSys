@@ -35,10 +35,20 @@ def _get_partitions(total: int, n_partition: int, divident=16) -> list[tuple[int
     if total <= 0 or n_partition <= 0 or divident <= 0 or total % divident:
         raise ValueError('total must be positive and divisible by divident')
     units = total // divident
-    return [tuple(x * divident for x in partition)
-            for partition in combinations_with_replacement(range(1, units + 1), n_partition)
-            if sum(partition) == units]
-
+    ret = []
+    def _inner(lst, n = 0):
+        rem = units - sum(lst)
+        if rem == 0: return 
+        if n == n_partition - 1:
+            ret.append(tuple([x * divident for x in lst + [rem]]))
+            return
+        for i in range(1, rem + 1):
+            lst.append(i)
+            _inner(lst, n + 1)
+            lst.pop()
+    
+    _inner([])
+    return ret
 
 def _get_streams(requested_sms, cleanup: ExitStack):
     """Allocate disjoint SM resources from one split; cleanup owns the handles."""
@@ -357,5 +367,5 @@ def draw():
 if __name__ == '__main__':
     # profile()
     # draw()
-    profile_single_stage(1, [8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 144, 160, 170])
+    profile_single_stage(1, [8, 16, 24, 32, 48, 64, 80, 96, 112, 128])
     

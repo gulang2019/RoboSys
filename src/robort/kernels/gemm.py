@@ -26,6 +26,8 @@ def get_autotune_config():
                       num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
                       num_warps=2),
+        triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5,
+                              num_warps=2),
         # Good config for fp8 inputs.
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 128, 'GROUP_SIZE_M': 8}, num_stages=3,
                       num_warps=8),
@@ -99,7 +101,7 @@ def matmul_kernel(
         
     if ACTIVATION == "leaky_relu":
         accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.bfloat16)
+    c = accumulator.to(tl.float16)
     
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -115,7 +117,7 @@ def leaky_relu(x):
 def matmul(a, b, activation = ""):
     M, K = a.shape
     K, N = b.shape
-    c = torch.empty((M,N), device = a.device, dtype = torch.bfloat16)
+    c = torch.empty((M,N), device = a.device, dtype = torch.float16)
     grid = lambda META: ((triton.cdiv(M, META['BLOCK_SIZE_M'])) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
     matmul_kernel[grid](
         a, b, c,
@@ -127,33 +129,69 @@ def matmul(a, b, activation = ""):
     )
     return c
 
-torch.manual_seed(0)
-a = torch.rand((512, 512), device=DEVICE, dtype=torch.bfloat16) - 0.5
-b = torch.rand((512, 512), device=DEVICE, dtype=torch.bfloat16) - 0.5
-triton_output = matmul(a, b)
-torch_output = torch.matmul(a, b)
-print(f"triton_output_with_fp16_inputs={triton_output}")
-print(f"torch_output_with_fp16_inputs={torch_output}")
+def benchmark(M, N, K, provider):
+    a = torch.randn((M, K), device=DEVICE, dtype=torch.float16)
+    b = torch.randn((K, N), device=DEVICE, dtype=torch.float16)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == ref_lib.lower():
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b), quantiles=quantiles)
+    if provider == 'roofline':
+        # Assume 4090
+        t = max(2 * M * N * K / 1e9 / 166, (M * N + N * K + M * K) * 2 / 1e9 / 999 * 1000)
+        return t, t, t
+    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
+    return ms, max_ms, min_ms
 
-if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
-    print("✅ Triton and Torch match")
-else:
-    print("❌ Triton and Torch differ")
-
-TORCH_HAS_FP8 = hasattr(torch, "float8_e5m2")
-if TORCH_HAS_FP8 and is_cuda():
+if __name__ == '__main__':
     torch.manual_seed(0)
-    a = torch.randn((512, 512), device=DEVICE, dtype=torch.bfloat16)
-    b = torch.randn((512, 512), device=DEVICE, dtype=torch.bfloat16)
-    a = a.to(torch.float8_e5m2)
-    # pre-transpose b for efficiency.
-    b = b.T
-    b = b.to(torch.float8_e5m2)
+    a = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
+    b = torch.rand((512, 512), device=DEVICE, dtype=torch.float16) - 0.5
     triton_output = matmul(a, b)
-    torch_output = torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16))
-    print(f"triton_output_with_fp8_inputs={triton_output}")
-    print(f"torch_output_with_fp8_inputs={torch_output}")
-    if torch.allclose(triton_output, torch_output, atol=0.125, rtol=0):
+    torch_output = torch.matmul(a, b)
+    print(f"triton_output_with_fp16_inputs={triton_output}")
+    print(f"torch_output_with_fp16_inputs={torch_output}")
+
+    if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
         print("✅ Triton and Torch match")
     else:
         print("❌ Triton and Torch differ")
+        
+    ref_lib = 'cuBLAS'
+
+    configs = []
+
+    configs.append(
+        triton.testing.Benchmark(
+            x_names=["M", "N", "K"],  # Argument names to use as an x-axis for the plot
+            x_vals=[128 * i for i in range(2, 33)],  # Different possible values for `x_name`
+            line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
+            # Possible values for `line_arg`
+            # Don't compare to cublas for fp8 cases as torch.matmul doesn't support fp8 at the moment.
+            line_vals= [ref_lib.lower(), "triton"],  # Label name for the lines
+            line_names= [ref_lib, "Triton"],  # Line styles
+            styles=[("green", "-"), ("blue", "-")],
+            ylabel="TFLOPS",  # Label name for the y-axis
+            plot_name="matmul-performance-" +
+            ("fp16"),  # Name for the plot, used also as a file name for saving the plot.
+            args={"fp8_inputs": False},
+        ))
+
+    # benchmark.run(show_plots=True, print_data=True, save_path = 'profile/triton.png')
+
+    for (M, N, K) in [
+        (712, 2560, 2048),
+        (10, 4096, 1024)
+        # (10, 2560, 1024),
+        # (10, 4096, 1024), 
+        # (10, 1024, 4096), 
+        # (10, 1024, 2048),
+        # (10, 658, 256),
+        # (10, 256, 658)
+    ]:
+        print(f'shape={M=}, {N=}, {K=}')
+        for provider in [ref_lib.lower(), 'triton', 'roofline']:
+            ms, max_ms, min_ms = benchmark(M, N, K, provider)
+            print(f'{provider=}, {ms=}, {max_ms=}, {min_ms=}')
+            
