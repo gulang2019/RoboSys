@@ -400,7 +400,7 @@ def debug_pair():
     ka = MLP(712, 2560, 2048, dtype = 'float16', _impl = 'triton-tuned')
     kb = MLP(10, 4096, 1024, dtype = 'float16', _cycle = 10,
             _impl = 'triton-tuned')
-    ca = triton.Config(kwargs={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8}, **{"num_warps": 4, "num_ctas": 1, "num_stages": 4, "num_buffers_warp_spec": 0, "num_consumer_groups": 0, "reg_dec_producer": 0, "reg_inc_consumer": 0, "maxnreg": None})
+    ca = triton.Config(kwargs={"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8}, **{"num_warps": 4, "num_ctas": 1, "num_stages": 4, "num_buffers_warp_spec": 0, "num_consumer_groups": 0, "reg_dec_producer": 0, "reg_inc_consumer": 0, "maxnreg": None})
     cb = triton.Config(kwargs = {
         "BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8}, **{"num_warps": 2, "num_ctas": 1, "num_stages": 5, "num_buffers_warp_spec": 0, "num_consumer_groups": 0, "reg_dec_producer": 0, "reg_inc_consumer": 0, "maxnreg": None
     })
