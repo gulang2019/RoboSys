@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Robot trace</title>
+<style>
+  :root { font: 14px system-ui,sans-serif; color: #25334b; background: #f3f5f9; }
+  body { max-width: 1400px; margin: auto; padding: 24px; }
+  h1 { font-size: 24px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 0 0 12px; }
+  section { background: white; border: 1px solid #dde3ec; border-radius: 12px; padding: 18px; margin: 16px 0; }
+  .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  input[type=range] { flex: 1; min-width: 180px; accent-color: #3768ac; }
+  button,select { padding: 6px 10px; border: 1px solid #cbd3df; border-radius: 6px; background: white; color: inherit; }
+  .muted { color: #68768a; font-size: 12px; } #summary { line-height: 1.8; }
+  .columns { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  .scroll { max-height: 430px; overflow: auto; } svg { width: 100%; display: block; }
+  svg text { font: 11px system-ui,sans-serif; fill: #536176; }
+  .clickable { cursor: pointer; } .clickable:hover { filter: brightness(.85); }
+  .cursor { stroke: #dd5246; stroke-width: 1.5; pointer-events: none; }
+  .images { display: flex; gap: 10px; flex-wrap: wrap; }
+  figure { margin: 0; flex: 1; min-width: 130px; } img { width: 100%; border-radius: 6px; }
+  figcaption { color: #68768a; font-size: 12px; overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; font-size: 12px; }
+  @media(max-width: 850px) { .columns { grid-template-columns: 1fr; } body { padding: 12px; } }
+</style>
+<h1 id="title">Robot trace</h1>
+<div id="summary"></div>
+<section class="controls">
+  <button id="play">Play</button>
+  <input id="time" type="range" min="0" step="1" value="0" aria-label="Simulation time">
+  <output id="clock"></output>
+  <select id="speed" aria-label="Playback speed"><option value=".5">0.5×</option><option selected>1</option><option>2</option><option>4</option></select>
+</section>
+<section>
+  <h2>Timeline</h2>
+  <div class="muted">Simulation milliseconds · gray bars: observation-to-delivery delay · filled slots: selected actions · outlined slots: unused plan</div>
+  <div class="scroll"><svg id="timeline" role="img" aria-label="Phase, observation, and action timeline"></svg></div>
+</section>
+<div class="columns">
+  <div>
+    <section><h2>Observed state <select id="state-channel" aria-label="State component"></select></h2><svg id="state-plot"></svg></section>
+    <section><h2>Policy actions <select id="action-channel" aria-label="Action component"></select></h2>
+      <div class="muted">Colored lines: predicted targets · black lines: selected targets · dashed lines: targets held after their action period</div><svg id="action-plot"></svg>
+    </section>
+  </div>
+  <div>
+    <section><h2>Observation <span id="observation-time" class="muted"></span></h2><div id="images" class="images"></div><pre id="state"></pre></section>
+    <section><h2>Selection</h2><pre id="details">Click an observation, action slot, or delivery marker.</pre></section>
+  </div>
+</div>
+<script id="trace-data" type="application/json">__TRACE_DATA__</script>
+<script>
+const data = JSON.parse(document.getElementById('trace-data').textContent);
+const $ = id => document.getElementById(id), cfg = data.config;
+const observations = [...data.observations].sort((a,b) => a.tick-b.tick);
+const actions = [...data.actions].sort((a,b) => a.tick-b.tick), chunks = data.inferences;
+const start = cfg.init_tick, period = cfg.tick_per_act;
+const end = data.finish_tick ?? Math.max(start, ...observations.map(o=>o.tick), ...actions.map(a=>a.tick), ...chunks.map(c=>c.tick));
+const horizon = Math.max(start+1, end, ...chunks.map(c=>c.obv_tick+c.actions.length*period));
+const ms = tick => (tick-start)*1000/cfg.tick_per_s, fmt = value => Number(value).toFixed(1);
+const color = id => `hsl(${(Number(id)*137.5+210)%360} 55% 48%)`;
+const x = tick => 130+(tick-start)/(horizon-start)*920;
+const selected = new Set(actions.map(a=>`${a.chunk_id}:${a.tick}`));
+const namespace = 'http://www.w3.org/2000/svg';
+function draw(svg, tag, attributes={}, text=null) {
+  const element = document.createElementNS(namespace, tag);
+  for (const [name,value] of Object.entries(attributes)) element.setAttribute(name,value);
+  if (text !== null) element.textContent = text;
+  svg.appendChild(element); return element;
+}
+function inspect(value) {
+  $('details').textContent = JSON.stringify(value,(key,value)=>
+    typeof value==='string' && value.startsWith('data:image/') ? '[image preview]' : value,2);
+}
+function clickable(element, label, tick, value) {
+  draw(element,'title',{},label); element.classList.add('clickable');
+  element.onclick = () => { seek(tick); inspect(value); };
+}
+function setup(svg,height) {
+  svg.replaceChildren(); svg.setAttribute('viewBox',`0 0 1080 ${height}`);
+  for (let i=0;i<=5;i++) {
+    const tick=start+(horizon-start)*i/5;
+    draw(svg,'line',{x1:x(tick),x2:x(tick),y1:20,y2:height-20,stroke:'#edf0f5'});
+    draw(svg,'text',{x:x(tick),y:13,'text-anchor':'middle'},fmt(ms(tick)));
+  }
+}
+function cursor(svg,height) {
+  draw(svg,'line',{class:'cursor',x1:x(start),x2:x(start),y1:20,y2:height-20});
+}
+function timeline() {
+  const svg=$('timeline'), height=120+chunks.length*30;
+  setup(svg,height);
+  draw(svg,'text',{x:4,y:41},'Phase'); draw(svg,'text',{x:4,y:69},'Observations');
+  draw(svg,'text',{x:4,y:96},'Selected / held');
+  const phases=[];
+  for (const observation of observations) {
+    if (phases.length && phases.at(-1).phase===observation.phase) continue;
+    if (phases.length) phases.at(-1).end=observation.tick;
+    phases.push({phase:observation.phase,start:observation.tick,end});
+  }
+  phases.forEach((phase,index)=> {
+    const rectangle=draw(svg,'rect',{x:x(phase.start),y:27,width:Math.max(1,x(phase.end)-x(phase.start)),height:19,fill:color(index),opacity:.22});
+    draw(svg,'text',{x:x(phase.start)+4,y:41},String(phase.phase ?? 'Unknown'));
+    clickable(rectangle,`Phase ${phase.phase}`,phase.start,phase);
+  });
+  observations.forEach(o=>clickable(draw(svg,'circle',{cx:x(o.tick),cy:64,r:3,fill:'#45668e'}),`Observation ${fmt(ms(o.tick))} ms`,o.tick,o));
+  actions.forEach((a,index)=> {
+    const stop=Math.min(end,actions[index+1]?.tick ?? end), covered=Math.min(stop,a.tick+period);
+    const rectangle=draw(svg,'rect',{x:x(a.tick),y:83,width:Math.max(1,x(covered)-x(a.tick)),height:16,fill:color(a.chunk_id)});
+    clickable(rectangle,`Chunk ${a.chunk_id}, selected at ${fmt(ms(a.tick))} ms`,a.tick,a);
+    if (stop>covered) draw(svg,'rect',{x:x(covered),y:83,width:x(stop)-x(covered),height:16,fill:color(a.chunk_id),opacity:.2});
+  });
+  chunks.forEach((chunk,row)=> {
+    const y=110+row*30;
+    draw(svg,'text',{x:4,y:y+17},`Chunk ${chunk.chunk_id}`);
+    draw(svg,'rect',{x:x(chunk.obv_tick),y,width:Math.max(1,x(chunk.tick)-x(chunk.obv_tick)),height:5,fill:'#abb8ca'});
+    chunk.actions.forEach((values,index)=> {
+      const tick=chunk.obv_tick+index*period, used=selected.has(`${chunk.chunk_id}:${tick}`);
+      const slot=draw(svg,'rect',{x:x(tick),y:y+9,width:Math.max(1,x(tick+period)-x(tick)-1),height:14,
+        fill:used ? color(chunk.chunk_id) : '#fff',stroke:color(chunk.chunk_id),opacity:tick>=end ? .35 : 1});
+      clickable(slot,`Action ${index}, ${fmt(ms(tick))} ms · ${used?'selected':'unused'}`,tick,{...chunk,action_index:index,action:values,selected:used});
+    });
+    const marker=draw(svg,'line',{x1:x(chunk.tick),x2:x(chunk.tick),y1:y-2,y2:y+25,stroke:'#25334b','stroke-width':2});
+    clickable(marker,`Delivery ${fmt(ms(chunk.tick))} ms · delay ${fmt(ms(chunk.tick)-ms(chunk.obv_tick))} ms`,chunk.tick,chunk);
+  });
+  draw(svg,'line',{x1:x(end),x2:x(end),y1:20,y2:height-20,stroke:'#68768a','stroke-dasharray':'4 4'});
+  cursor(svg,height);
+}
+function plot(svg,lines) {
+  const height=190, values=lines.flatMap(line=>line.points.map(point=>point[1])).filter(Number.isFinite);
+  setup(svg,height);
+  if (!values.length) draw(svg,'text',{x:140,y:90},'No recorded values');
+  const low=values.length ? values.reduce((a,b)=>Math.min(a,b)) : 0, high=values.length ? values.reduce((a,b)=>Math.max(a,b)) : 1;
+  const padding=(high-low)*.1 || 1, y=value=>155-(value-low+padding)/(high-low+2*padding)*120;
+  for (const value of [low,high]) draw(svg,'text',{x:120,y:y(value),'text-anchor':'end'},value.toFixed(3));
+  for (const line of lines) {
+    const points=line.points.filter(point=>Number.isFinite(point[1]));
+    const path=points.map(([tick,value],index)=>`${index?'L':'M'}${x(tick)},${y(value)}`).join(' ');
+    const element=draw(svg,'path',{d:path,fill:'none',stroke:line.color,'stroke-width':line.width || 1.5,
+      opacity:line.opacity ?? 1,'stroke-dasharray':line.dashed ? '4 3' : ''});
+    if (line.record && points.length) clickable(element,line.label,points[0][0],line.record);
+  }
+  cursor(svg,height);
+}
+function plots() {
+  const stateChannel=Number($('state-channel').value), actionChannel=Number($('action-channel').value);
+  plot($('state-plot'),[{color:'#3768ac',points:observations.map(o=>[o.tick,o.request.observation['observation/state']?.[stateChannel]])}]);
+  const lines=chunks.map(chunk=>({color:color(chunk.chunk_id),opacity:.35,record:chunk,label:`Chunk ${chunk.chunk_id}`,
+    points:chunk.actions.flatMap((a,index)=>[[chunk.obv_tick+index*period,a[actionChannel]],[chunk.obv_tick+(index+1)*period,a[actionChannel]]])}));
+  actions.forEach((a,index)=> {
+    const stop=Math.min(end,actions[index+1]?.tick ?? end), covered=Math.min(stop,a.tick+period), value=a.action[actionChannel];
+    lines.push({color:'#17263d',width:3,points:[[a.tick,value],[covered,value]],record:a,label:'Selected target'});
+    if (stop>covered) lines.push({color:'#17263d',dashed:true,points:[[covered,value],[stop,value]],record:a,label:'Held after action period'});
+  });
+  plot($('action-plot'),lines);
+}
+function seek(tick) {
+  position=Math.max(start,Math.min(end,tick));
+  tick=Math.max(start,Math.min(end,Math.round(tick))); $('time').value=tick-start;
+  $('clock').textContent=`${fmt(ms(tick))} / ${fmt(ms(end))} ms`;
+  document.querySelectorAll('.cursor').forEach(line=> { line.setAttribute('x1',x(tick)); line.setAttribute('x2',x(tick)); });
+  const observation=observations.findLast(o=>o.tick<=tick);
+  $('images').replaceChildren();
+  $('observation-time').textContent=observation ? `${fmt(ms(observation.tick))} ms` : '';
+  $('state').textContent=observation ? JSON.stringify({phase:observation.phase,state:observation.request.observation['observation/state'] ?? [],prompt:observation.request.observation.prompt ?? ''},null,2) : 'No observation yet';
+  for (const [name,value] of Object.entries(observation?.request.observation ?? {})) {
+    if (typeof value!=='string' || !value.startsWith('data:image/')) continue;
+    const figure=document.createElement('figure'), image=document.createElement('img'), caption=document.createElement('figcaption');
+    image.src=value; image.alt=name; caption.textContent=name; figure.append(image,caption); $('images').append(figure);
+  }
+}
+function channels(id,count) {
+  for (let index=0;index<Math.max(1,count);index++) { const option=document.createElement('option'); option.value=index; option.textContent=`Component ${index}`; $(id).append(option); }
+  $(id).onchange=()=> { plots(); seek(start+Number($('time').value)); };
+}
+let playing=false, previous=null, position=start;
+function animate(now) {
+  if (!playing) return;
+  const tick=position+(previous===null ? 0 : (now-previous)*cfg.tick_per_s/1000*Number($('speed').value));
+  previous=now; seek(tick);
+  if (tick>=end) { playing=false; $('play').textContent='Play'; }
+  else requestAnimationFrame(animate);
+}
+$('play').onclick=()=> { playing=!playing; previous=null; if (playing && Number($('time').value)>=end-start) seek(start); $('play').textContent=playing?'Pause':'Play'; if (playing) requestAnimationFrame(animate); };
+$('time').max=Math.max(0,end-start); $('time').oninput=()=>seek(start+Number($('time').value));
+$('title').textContent=`Robot trace · ${cfg.name}`;
+const delays=chunks.map(c=>(c.tick-c.obv_tick)*1000/cfg.tick_per_s);
+const coverage=actions.reduce((sum,a,index)=>sum+Math.max(0,Math.min(end,actions[index+1]?.tick ?? end,a.tick+period)-a.tick),0);
+$('summary').textContent=`${data.outcome ? (data.outcome.success?'Succeeded':'Failed') : 'Unfinished'} · ${fmt(ms(end))} ms · ${chunks.length} chunks · mean delay ${delays.length?fmt(delays.reduce((a,b)=>a+b,0)/delays.length):'—'} ms · starvation ${fmt(Math.max(0,end-start-coverage)*1000/cfg.tick_per_s)} ms`;
+channels('state-channel',Math.max(0,...observations.map(o=>o.request.observation['observation/state']?.length ?? 0)));
+channels('action-channel',Math.max(0,...chunks.map(c=>c.actions[0]?.length ?? 0),...actions.map(a=>a.action.length)));
+timeline(); plots(); seek(start);
+</script>
+</html>
